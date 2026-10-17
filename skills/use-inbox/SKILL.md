@@ -24,7 +24,14 @@ description: How to ask the owner a question or request the owner's approval thr
   - `answer`: the owner's answer is in `message`.
   - `clarify`: the owner needs more from you; the request is closed. Ask again with a new item that answers the owner's question.
 - `status: unknown`: no such item of yours (wrong id). Treat it as no answer.
-- `status: expired`: nobody answered in time. Never treat expired, unknown or a missing answer as approval. Ask again only if it still matters.
+- `status: expired`: nobody answered in time, or you withdrew the item. Never treat expired, unknown or a missing answer as approval. Ask again only if it still matters.
+
+## Withdraw an item you no longer need
+- Call `inbox__inbox_withdraw` with the `itemId` and, if you can, a short `reason` (the owner reads it), for example when the question was answered somewhere else.
+- `result: withdrawn`: the item is closed. It reads as `expired` in `inbox__inbox_status` and the owner sees "Withdrawn by <you>" with your reason. Calling it again gives the same answer.
+- `result: not_open`: the owner already answered it, or it already expired. Nothing changed. Read it with `inbox__inbox_status`; an answer that came in still counts.
+- `result: unknown`: no such item of yours. Only the agent or app that asked can withdraw an item.
+- A withdrawn item is never an approval. Do not act on it as if it were one.
 
 ## Add information
 - Call `inbox__inbox_reply` with `itemId` and `message` to add facts to an open item. An answer the owner gave on the older text is refused, so the owner always decides on your latest message.

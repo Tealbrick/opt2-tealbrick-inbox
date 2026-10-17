@@ -38,10 +38,14 @@ test("manifest validates; agent ops and person ops are the brief's set", () => {
       .filter((o) => o.audience === aud)
       .map((o) => o.id)
       .sort();
-  assert.deepEqual(by("agent"), ["inbox_ask", "inbox_reply", "inbox_status"]);
+  assert.deepEqual(by("agent"), ["inbox_ask", "inbox_reply", "inbox_status", "inbox_withdraw"]);
   assert.deepEqual(by("person"), ["alerts_get", "alerts_set", "holds_overview", "item_ack", "item_decide", "item_get", "item_priority", "item_snooze", "items_list"]);
   const ask = manifest.operations.find((o) => o.id === "inbox_ask");
   assert.equal(ask?.idempotency, "required", "inbox_ask needs an idempotency key");
+  // inbox_withdraw: a state change of the caller's own item (update), naturally idempotent (a repeat answers the same),
+  // so the key is supported, not required; a receipt names the verified caller. A companion declares crud ⊇ ["update"].
+  const wd = manifest.operations.find((o) => o.id === "inbox_withdraw");
+  assert.deepEqual([wd?.audience, wd?.crud, wd?.effect, wd?.idempotency, wd?.receipt], ["agent", ["update"], "write", "supported", true]);
   assert.deepEqual(
     manifest.companions?.map((c) => [c.product, c.operations, c.crud]),
     [
