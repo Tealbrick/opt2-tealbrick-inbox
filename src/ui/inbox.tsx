@@ -11,6 +11,7 @@ import { ago, day, errText, Head, LoadError, Loading, useOp, when, whenShort } f
 type View = "pending" | "snoozed" | "done" | "all";
 type Summary = ItemsListOutput["items"][number];
 type Response = ItemGetOutput["responses"][number];
+type Activity = ItemGetOutput["activity"][number];
 type Priority = Summary["priority"];
 
 const PRIORITY_STATUS: Record<Priority, Status> = { urgent: "needs-you", high: "needs-you", normal: "default", low: "default" };
@@ -18,7 +19,13 @@ const PRIORITY_LABEL: Record<Priority, string> = { low: "Low", normal: "Normal",
 const LABEL: Record<Response, string> = { approve: "Approve", deny: "Deny", answer: "Send answer", clarify: "Ask for clarification" };
 const VARIANT: Record<Response, "primary" | "danger" | "secondary"> = { approve: "primary", answer: "primary", deny: "danger", clarify: "secondary" };
 const DONE_LABEL: Record<Response, string> = { approve: "Approved", deny: "Denied", answer: "Answered", clarify: "Clarification asked" };
+const REFUSAL_TEXT: Record<string, string> = {
+  not_raiser: "not the caller that raised this item",
+  unknown_item: "no such item",
+  no_product: "the calling app has no verified product",
+};
 const ALERT_ERRORS: Record<string, string> = {
+  withdrawn: "the item was withdrawn before the alert was sent",
   no_sender_identity: "open Connect, Senders, and choose the workspace sender for app messages",
   no_grant: "Connect is not in this workspace",
   denied: "you denied it in Connect",
@@ -53,7 +60,7 @@ function Row({ item, active, href, onOpen }: { item: Summary; active: boolean; h
         <span className="tb-row">
           {item.priority !== "normal" ? <Tag status={PRIORITY_STATUS[item.priority]}>{PRIORITY_LABEL[item.priority]}</Tag> : null}
           {item.status === "answered" ? <Tag status="live">{item.response ? DONE_LABEL[item.response] : "Answered"}</Tag> : null}
-          {item.status === "expired" ? <Tag>Expired</Tag> : null}
+          {item.status === "expired" ? <Tag>{item.withdrawn ? "Withdrawn" : "Expired"}</Tag> : null}
           {item.snoozedUntil ? <Tag>Snoozed</Tag> : null}
         </span>
       ) : null}
@@ -62,6 +69,17 @@ function Row({ item, active, href, onOpen }: { item: Summary; active: boolean; h
 }
 
 type Result = { status: "live" | "needs-you"; text: string };
+
+/** One line of the item history. Every value is agent- or app-supplied text and goes through React (escaped), never as markup. */
+function ActivityLine({ a, owner }: { a: Activity; owner: string }) {
+  const who = `${a.actor.name}${a.actor.product ? ` (${a.actor.product})` : ""}`;
+  return (
+    <li>
+      <b>{a.kind === "withdrawn" ? `Withdrawn by ${owner}` : `Withdraw refused for ${who}`}</b> <span className="meta">{ago(a.at)}</span>
+      {a.kind === "withdraw_refused" ? <p>{REFUSAL_TEXT[a.detail ?? ""] ?? "refused"}</p> : null}
+    </li>
+  );
+}
 
 function Detail({ id, onChanged }: { id: string; onChanged: () => void }) {
   const { data: item, error, reload } = useOp<ItemGetOutput>("item_get", { itemId: id }, 15_000);
@@ -111,7 +129,7 @@ function Detail({ id, onChanged }: { id: string; onChanged: () => void }) {
       </p>
       <h2>{item.title}</h2>
       <div className="tb-row">
-        {open ? <Tag status="needs-you">waiting for you</Tag> : <Tag status={item.status === "answered" ? "live" : "default"}>{item.status}</Tag>}
+        {open ? <Tag status="needs-you">waiting for you</Tag> : <Tag status={item.status === "answered" ? "live" : "default"}>{item.withdrawal ? "withdrawn" : item.status}</Tag>}
         <Tag status={PRIORITY_STATUS[item.priority]}>{PRIORITY_LABEL[item.priority]}</Tag>
         {item.acked && open ? <Tag>seen</Tag> : null}
         {open ? <span className="tb-hint">Expires {day(item.expiresAt)}</span> : null}
@@ -132,7 +150,25 @@ function Detail({ id, onChanged }: { id: string; onChanged: () => void }) {
           <strong>You answered {item.decision.response}</strong> {when(item.decision.decidedAt)}.
         </Notice>
       ) : null}
-      {item.status === "expired" ? <Notice tone="needs-you">This item expired before it was answered. The agent must ask again.</Notice> : null}
+      {item.withdrawal ? (
+        <Notice tone="neutral">
+          <strong>Withdrawn by {item.from.name}</strong> {when(item.withdrawal.at)}. It no longer needs an answer.
+          {item.withdrawal.reason ? (
+            <>
+              {" "}
+              Reason: <span className="pre">{item.withdrawal.reason}</span>
+            </>
+          ) : null}
+        </Notice>
+      ) : null}
+      {item.status === "expired" && !item.withdrawal ? <Notice tone="needs-you">This item expired before it was answered. The agent must ask again.</Notice> : null}
+      {item.activity.length > 0 ? (
+        <ol className="msgs" aria-label="History">
+          {item.activity.map((a) => (
+            <ActivityLine key={a.id} a={a} owner={item.from.name} />
+          ))}
+        </ol>
+      ) : null}
       {unread ? (
         <Notice tone="needs-you" role="alert" className="with-action">
           <span className="tb-row">
@@ -215,7 +251,7 @@ function Detail({ id, onChanged }: { id: string; onChanged: () => void }) {
 const EMPTY: Record<View, string> = {
   pending: "Nothing waits for you.",
   snoozed: "No snoozed items.",
-  done: "No answered or expired items yet.",
+  done: "No answered, expired or withdrawn items yet.",
   all: "No items yet.",
 };
 
