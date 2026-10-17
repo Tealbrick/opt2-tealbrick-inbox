@@ -1,0 +1,23 @@
+{
+  "setup": [
+    {
+      "id": "open_item",
+      "as": "agentA",
+      "op": "inbox_ask",
+      "input": {
+        "kind": "question",
+        "title": "Conformance question",
+        "context": "A fixture item for the withdraw checks."
+      },
+      "capture": {
+        "itemId": "/itemId"
+      }
+    }
+  ],
+  "inputs": {
+    "inbox_withdraw": {
+      "itemId": "${itemId}",
+      "reason": "Conformance fixture withdraw"
+    }
+  }
+}
