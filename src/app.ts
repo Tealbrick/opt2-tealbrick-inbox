@@ -172,7 +172,15 @@ export const handlers = {
     async run(input, ctx) {
       owner(ctx);
       const c = ctx as SdkOpContext;
-      return store.get(ctx.db, input.itemId, begin(ctx), (product, path) => c.ownerLinkFor(product, path));
+      return store.get(ctx.db, input.itemId, begin(ctx), (product, path) => {
+        try {
+          return c.ownerLinkFor(product, path);
+        } catch (e) {
+          // a stored page the shared rule refuses is shown as no link; say why (never the path itself)
+          ctx.log.warn("open link refused", { item: input.itemId, code: e instanceof TbError ? e.code : "unknown" });
+          return null;
+        }
+      });
     },
   }),
   [OP.itemDecide]: op<ItemDecideInput, ItemDecideOutput>({

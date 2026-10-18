@@ -1,7 +1,7 @@
 // Inbox domain over the app's own tables (migrations/0001_init.sql). Plain functions over the SDK's Db with an
 // explicit `now`, so handlers stay thin and tests drive them directly. Every state change is one transaction and is
 // guarded in SQL (`WHERE status = 'open' …`, changes === 1): a duplicate, stale or expired answer fails closed.
-import { ulid } from "@opt2-tealbrick/manifest";
+import { isValidLaunchPath, ulid } from "@opt2-tealbrick/manifest";
 import { type Db, TbError } from "@opt2-tealbrick/miniapp-sdk";
 
 export const KINDS = ["approval", "question"] as const;
@@ -176,6 +176,8 @@ export function ask(db: Db, from: From & { product?: string | null }, input: Ask
     throw new TbError("response_not_allowed", `A ${input.kind} item allows only ${allowed.join(", ")}; not ${wrong.join(", ")}.`, 400);
   if (input.kind === "approval" && !responses.some((r) => r === "approve" || r === "deny"))
     throw new TbError("response_not_allowed", "An approval item must allow approve or deny.", 400);
+  // the handler refuses a bad page first (with the caller's error); the store keeps its own invariant too
+  if (input.open !== undefined && !isValidLaunchPath(input.open.path)) throw new TbError("path_invalid", "open.path must be a page of your app such as /review/<id>.", 400);
   const open = Number(db.prepare("SELECT COUNT(*) AS n FROM inbox_items WHERE from_id = ? AND status = 'open'").get(from.id)?.n ?? 0);
   if (open >= MAX_OPEN_PER_CALLER)
     throw new TbError("too_many_open_items", `You have ${open} open items. Wait for answers or let some expire before asking again.`, 429);
@@ -476,8 +478,9 @@ function activityOf(db: Db, itemId: string): ActivityView[] {
 
 /**
  * R5: the raising app's page, linked through its RECORDED verified product (never a product from any input). The label
- * is the app's name as the Portal-signed slice gave it at ask time (Core takes it from the app's signed release); the SDK
- * falls back to the instance id when the slice had no name, and then the product id is shown instead.
+ * is the app's name as the Portal-signed slice gave it AT ASK TIME (Core takes it from the app's signed release; a later
+ * rename is not shown); the SDK falls back to the instance id when the slice had no name, and then the product id is shown.
+ * `linkFor` may log a refused link; a refusal here only means "no link".
  */
 function openOf(r: Row, linkFor: LinkFor | undefined): ItemDetail["open"] {
   const product = str(r.from_product);

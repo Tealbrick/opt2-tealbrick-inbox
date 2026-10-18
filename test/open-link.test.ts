@@ -43,7 +43,7 @@ test("R5 bad cases: an agent, an app without a verified product, and a path the 
   const db = memoryDb();
   await assert.rejects(h.inbox_ask.run({ kind: "question", title: "x", open: { path: "/review" } }, ctxFor(db, AGENT)), code("open_not_allowed", 400));
   await assert.rejects(h.inbox_ask.run({ kind: "question", title: "x", open: { path: "/review" } }, ctxFor(db, NO_PRODUCT)), code("caller_unverified", 403));
-  for (const path of ["https://evil.example/x", "//evil.example/x", "/a/../b", "review", "/a\\b", "/a\nb"])
+  for (const path of ["https://evil.example/x", "//evil.example/x", "/a/../b", "review", "/a\\b", "/a\nb", "/%2F%2Fevil.example", "/a/%2e%2e/b", "/%5Cevil", "/a%00b"])
     await assert.rejects(h.inbox_ask.run({ kind: "question", title: "x", open: { path } }, ctxFor(db, OBSERVER)), code("path_invalid", 400), JSON.stringify(path));
   assert.equal(count(db), 0);
 });
@@ -77,4 +77,33 @@ test("R5 upgrade: a 0.3.0 database takes migration 0003; old rows load with no l
   const got = await h.item_get.run({ itemId: "itm_old" }, ctxFor(db, OWNER));
   assert.equal(got.open, null);
   assert.equal(got.title, "Old");
+});
+
+test("R5: the store refuses a bad page itself, whoever calls it", () => {
+  const db = memoryDb();
+  assert.throws(() => store.ask(db, { type: "app", id: OBSERVER.id, name: "Observer", product: "observer" }, { kind: "question", title: "x", open: { path: "//evil.example" } }, 1), code("path_invalid", 400));
+  assert.equal(count(db), 0);
+});
+
+test("R5: a stored page without a recorded product never links; a refused stored page is logged without the path", async () => {
+  const db = memoryDb();
+  const { itemId } = await h.inbox_ask.run({ kind: "question", title: "x", open: { path: "/review" } }, ctxFor(db, OBSERVER));
+  db.prepare("UPDATE inbox_items SET from_product = NULL WHERE id = ?").run(itemId);
+  assert.equal((await h.item_get.run({ itemId }, ctxFor(db, OWNER))).open, null);
+
+  db.prepare("UPDATE inbox_items SET from_product = 'observer', open_path = '//evil.example/secret' WHERE id = ?").run(itemId);
+  const warned: unknown[] = [];
+  const ctx = { ...ctxFor(db, OWNER), log: { debug() {}, info() {}, error() {}, warn: (...a: unknown[]) => warned.push(a) } };
+  assert.equal((await h.item_get.run({ itemId }, ctx)).open, null);
+  assert.equal(warned.length, 1);
+  assert.ok(!JSON.stringify(warned).includes("secret"), "the log never carries the path");
+});
+
+test("R5: the link stays on the item after the owner decides (the history still points to the app page)", async () => {
+  const db = memoryDb();
+  const { itemId } = await h.inbox_ask.run({ kind: "question", title: "x", open: { path: "/review" } }, ctxFor(db, OBSERVER));
+  await h.item_decide.run({ itemId, response: "answer", message: "Done.", version: 1 }, ctxFor(db, OWNER));
+  const got = await h.item_get.run({ itemId }, ctxFor(db, OWNER));
+  assert.equal(got.status, "answered");
+  assert.deepEqual(got.open, { url: link("observer", "/review"), app: "Observer" });
 });

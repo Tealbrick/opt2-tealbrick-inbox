@@ -229,6 +229,12 @@ describe("inbox_withdraw through the real SDK", () => {
     assert.equal(bad.status, 400);
     const extra = await call("inbox_ask", { kind: "question", title: "x", open: { path: "/review", product: "kanban" } }, asApp(CREATIVE_1, "creative"), key());
     assert.equal(extra.status, 400, "the product is never an input");
+    const long = await call("inbox_ask", { kind: "question", title: "x", open: { path: `/${"a".repeat(200)}` } }, asApp(CREATIVE_1, "creative"), key());
+    assert.equal(long.status, 400, "the schema caps the path at 200");
+    // the same idempotency key with another page is a conflict, never a second item or a changed link
+    const k = key();
+    ok(await call("inbox_ask", { kind: "question", title: "same", open: { path: "/review" } }, asApp(CREATIVE_1, "creative"), k));
+    assert.equal((await call("inbox_ask", { kind: "question", title: "same", open: { path: "/sources" } }, asApp(CREATIVE_1, "creative"), k)).status, 409);
   });
 
   it("the SDK checks the input: a missing itemId or an unknown field is refused before the handler", async () => {
