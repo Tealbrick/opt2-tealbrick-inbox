@@ -110,7 +110,11 @@ export function writeAlerts(db: Db, input: AlertsInput, now = Date.now()): Alert
     // turning the digest on starts its first window now: items alerted one by one before are not repeated
     if (isDigest && !wasDigest) writeSetting(db, DIGEST_CURSOR, now);
     // leaving the digest for one DM per item: the open window is still sent, once, by the next tick
-    if (wasDigest && !isDigest && next.dm !== "off") writeSetting(db, DIGEST_FLUSH, { from: readSetting<number>(db, DIGEST_CURSOR, now), to: now });
+    // (an earlier unsent flush is widened, never replaced: its items are still owed one message)
+    if (wasDigest && !isDigest && next.dm !== "off") {
+      const owed = readSetting<{ from: number; to: number } | null>(db, DIGEST_FLUSH, null);
+      writeSetting(db, DIGEST_FLUSH, { from: owed?.from ?? readSetting<number>(db, DIGEST_CURSOR, now), to: now });
+    }
     if (next.dm === "off") writeSetting(db, DIGEST_FLUSH, null);
   });
   return next;
@@ -276,7 +280,7 @@ function buildDigest(db: Db, a: Alerts, from: number, to: number, now: number, l
  * cursor move and the row insert are one transaction: a crash between them can never send a window twice or skip it.
  */
 export async function digestTick(db: Db, callApp: Send, ownerLink: (path: string) => string | null, now: number): Promise<void> {
-  const a = readAlerts(db);
+  let a = readAlerts(db);
   if (inQuiet(a.quietHours, a.timeZone, now)) return;
   let link: string | null = null;
   try {
@@ -291,6 +295,7 @@ export async function digestTick(db: Db, callApp: Send, ownerLink: (path: string
       return a.dm === "off" ? null : buildDigest(db, a, flush.from, flush.to, now, link);
     });
     if (fid) await attempt(db, callApp, "inbox_digests", fid, now);
+    a = readAlerts(db); // the owner may have changed the settings while the flush was sent
   }
   if (a.dm === "off" || a.delivery !== "digest") return;
   const cursor = readSetting<number | null>(db, DIGEST_CURSOR, null);

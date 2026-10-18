@@ -347,6 +347,27 @@ test("S2-2: switching from the digest to one DM per item still sends the open wi
   assert.equal(conn2.sent.length, 0);
 });
 
+test("S3 re-check: a second digest → each switch before the tick keeps the first owed window (one message for all)", async (t) => {
+  const c = clockAt("2026-10-18T10:00:00Z");
+  t.after(() => c.restore());
+  const db = memoryDb();
+  const conn = fakeConnect();
+  await h.alerts_set.run(alerts({ delivery: "digest" }), ctxFor(db, OWNER));
+  c.set("2026-10-18T10:10:00Z");
+  await h.inbox_ask.run({ kind: "question", title: "owed A" }, ctxFor(db, AGENT, conn.callApp));
+  c.set("2026-10-18T10:20:00Z");
+  await h.alerts_set.run(alerts({ delivery: "each" }), ctxFor(db, OWNER));
+  c.set("2026-10-18T10:21:00Z");
+  await h.alerts_set.run(alerts({ delivery: "digest" }), ctxFor(db, OWNER));
+  c.set("2026-10-18T10:25:00Z");
+  await h.inbox_ask.run({ kind: "question", title: "owed B" }, ctxFor(db, AGENT, conn.callApp));
+  c.set("2026-10-18T10:30:00Z");
+  await h.alerts_set.run(alerts({ delivery: "each" }), ctxFor(db, OWNER));
+  await tick(startCtx(db, conn.callApp) as never, c.now);
+  assert.equal(conn.sent.length, 1);
+  assert.match(String((conn.sent[0]?.input as { content: string } | undefined)?.content), /^Operator Inbox: 2 new items wait for you\.\n- Scout has a question: owed A\n- Scout has a question: owed B\n/);
+});
+
 test("turning alerts off or changing the target closes every send that has not gone out (item DMs and digests)", async (t) => {
   const c = clockAt("2026-10-18T21:00:00Z");
   t.after(() => c.restore());
@@ -367,7 +388,7 @@ test("turning alerts off or changing the target closes every send that has not g
   assert.equal(conn.sent.length, 0);
 });
 
-test("a digest that waits for approval in Connect blocks the next build; after approval the next digest covers both windows", async (t) => {
+test("a digest that waits for approval in Connect blocks the next build; after approval the next digest names the items since the held one", async (t) => {
   const c = clockAt("2026-10-18T10:00:00Z");
   t.after(() => c.restore());
   const db = memoryDb();
