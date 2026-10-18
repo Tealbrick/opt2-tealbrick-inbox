@@ -2,8 +2,9 @@
 // + instance for an app, the agent id for an agent), the no-oracle answer, idempotency, the not_open answer, the audit
 // rows and their throttle, the upgrade of a 0.2.9 database. The same rules against the real SDK and a bridge: withdraw-real.test.ts.
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { mock, test } from "node:test";
 import type { TbError } from "@opt2-tealbrick/miniapp-sdk";
+import { alertNewItem, retryDue, SEND_TIMEOUT_MS, writeAlerts } from "../src/alerts.ts";
 import { clock, handlers } from "../src/app.ts";
 import * as store from "../src/store.ts";
 import { AGENT, ctxFor, memoryDb, migrate, OTHER, OWNER } from "./helpers.ts";
@@ -200,13 +201,14 @@ test("audit: a withdraw row carries the verified product and instance; refused a
     await h.inbox_withdraw.run({ itemId: asked.itemId }, ctxFor(db, CREATIVE_2));
     const rows = store.get(db, asked.itemId, NOW + store.REFUSAL_SAME_ITEM_MS + 1).activity;
     assert.deepEqual(
-      rows.map((a) => [a.kind, a.actor.id, a.actor.product, a.detail]),
+      rows.map((a) => [a.kind, a.actor.id, a.actor.product, a.detail, a.count]),
       [
-        ["withdraw_refused", OTHER_APP.id, "kanban", "not_raiser"],
-        ["withdraw_refused", OTHER_APP.id, "kanban", "not_raiser"],
-        ["withdraw_refused", CREATIVE_2.id, "creative", "not_raiser"],
+        ["withdraw_refused", OTHER_APP.id, "kanban", "not_raiser", 2],
+        ["withdraw_refused", CREATIVE_2.id, "creative", "not_raiser", 1],
       ],
+      "two rows of one actor and one cause are folded into one line with a count",
     );
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM inbox_activity WHERE item_id = ?").get(asked.itemId)?.n, 3, "all three rows are stored");
 
     await h.inbox_withdraw.run({ itemId: asked.itemId, reason: "done" }, ctxFor(db, CREATIVE));
     const full = store.get(db, asked.itemId, NOW + store.REFUSAL_SAME_ITEM_MS + 2);
@@ -300,4 +302,116 @@ test("upgrade from a 0.2.9 database: old rows load, an old agent item can be wit
   // new asks record the product, and then the same app can withdraw
   const fresh = store.ask(db, { type: "app", id: CREATIVE.id, name: "Creative", product: "creative" }, { kind: "question", title: "New" }, NOW);
   assert.equal(store.withdraw(db, { ...CREATIVE }, fresh.id, undefined, NOW).result, "withdrawn");
+});
+
+test("S4-3: junk ids have their own hourly cap, so they cannot hide a probe of a real item", async () => {
+  await withClock(async () => {
+    const db = memoryDb();
+    const asked = await ask(db, CREATIVE);
+    for (let i = 0; i < store.REFUSAL_PER_ACTOR_HOUR * 3; i++) assert.equal((await h.inbox_withdraw.run({ itemId: `itm_junk_${i}` }, ctxFor(db, OTHER_APP))).result, "unknown");
+    const junk = Number(db.prepare("SELECT COUNT(*) AS n FROM inbox_activity WHERE detail = 'unknown_item'").get()?.n);
+    assert.equal(junk, store.REFUSAL_PER_ACTOR_HOUR, "junk attempts stop at their own cap");
+    // the cap for junk is spent; the probe of the REAL item is still recorded
+    assert.equal((await h.inbox_withdraw.run({ itemId: asked.itemId }, ctxFor(db, OTHER_APP))).result, "unknown");
+    assert.deepEqual(
+      store.get(db, asked.itemId, NOW).activity.map((a) => [a.kind, a.actor.id, a.detail, a.count]),
+      [["withdraw_refused", OTHER_APP.id, "not_raiser", 1]],
+    );
+    // and real-item probes have a cap of their own, per actor
+    for (let i = 0; i < store.REFUSAL_PER_ACTOR_HOUR + 5; i++) await h.inbox_withdraw.run({ itemId: (await ask(db, CREATIVE, `t${i}`)).itemId }, ctxFor(db, OTHER_APP));
+    assert.equal(Number(db.prepare("SELECT COUNT(*) AS n FROM inbox_activity WHERE detail = 'not_raiser'").get()?.n), store.REFUSAL_PER_ACTOR_HOUR);
+  });
+});
+
+test("S3-2: item_get caps the refused lines (newest REFUSAL_LINES_SHOWN), keeps every withdraw row, and folds repeats with a count", async () => {
+  const db = memoryDb();
+  const asked = await ask(db, CREATIVE);
+  const ins = db.prepare("INSERT INTO inbox_activity (id, item_id, kind, actor_type, actor_id, actor_product, actor_name, detail, created_at) VALUES (?, ?, ?, 'app', ?, ?, ?, ?, ?)");
+  // the withdraw row is the OLDEST row of the item and must survive the cap
+  ins.run("act_00000", asked.itemId, "withdrawn", CREATIVE.id, "creative", "Creative", "done", NOW);
+  // 500 refused attempts: one noisy actor 100 times (folds to one line), 400 more by 200 other actors (2 each)
+  let n = 1;
+  for (let i = 0; i < 100; i++) ins.run(`act_${String(n++).padStart(5, "0")}`, asked.itemId, "withdraw_refused", "ins_noisy", "kanban", "Board", "not_raiser", NOW + 1000 + n);
+  for (let a = 0; a < 200; a++)
+    for (let k = 0; k < 2; k++) ins.run(`act_${String(n++).padStart(5, "0")}`, asked.itemId, "withdraw_refused", `ins_actor_${String(a).padStart(3, "0")}`, "p", `A${a}`, "not_raiser", NOW + 2000 + n);
+  const lines = store.get(db, asked.itemId, NOW).activity;
+  const refused = lines.filter((l) => l.kind === "withdraw_refused");
+  assert.equal(refused.length, store.REFUSAL_LINES_SHOWN);
+  assert.equal(lines.filter((l) => l.kind === "withdrawn").length, 1, "the withdraw row is kept");
+  assert.equal(lines[0]?.kind, "withdrawn", "oldest first");
+  assert.ok(refused.every((l) => l.count === 2), "the newest 50 lines are the 2-attempt actors; each is folded to count 2");
+  assert.ok(!refused.some((l) => l.actor.id === "ins_noisy"), "the oldest line (the noisy actor) fell off the cap");
+  // the noisy actor alone: one line with its full count
+  db.prepare("DELETE FROM inbox_activity WHERE actor_id <> 'ins_noisy' AND kind = 'withdraw_refused'").run();
+  const only = store.get(db, asked.itemId, NOW).activity.filter((l) => l.kind === "withdraw_refused");
+  assert.deepEqual(only.map((l) => [l.actor.id, l.count]), [["ins_noisy", 100]]);
+});
+
+const NPUB = `npub1${"q".repeat(58)}`;
+const alertsOn = (db: ReturnType<typeof memoryDb>) => writeAlerts(db, { dm: "buzz", buzzTo: NPUB, channelAccount: null, channelPerson: null });
+const delivery = (db: ReturnType<typeof memoryDb>, itemId: string) => store.get(db, itemId, NOW).deliveries.map((d) => [d.status, d.error]);
+
+test("S3-1: a send in flight while the item is withdrawn never overwrites the closed delivery (sent, held, error and timeout paths)", async (t) => {
+  const outcomes: [string, (release: () => void) => ReturnType<typeof ctxFor>["callApp"]][] = [
+    [
+      "sent",
+      (release) => async () => {
+        release();
+        return { status: "ok" } as never;
+      },
+    ],
+    [
+      "held",
+      (release) => async () => {
+        release();
+        return { status: "held", holdId: "hld_1" } as never;
+      },
+    ],
+    [
+      "error",
+      (release) => async () => {
+        release();
+        throw Object.assign(new Error("denied"), { code: "denied" });
+      },
+    ],
+  ];
+  for (const [label, makeCall] of outcomes) {
+    const db = memoryDb();
+    alertsOn(db);
+    const item = store.ask(db, { type: "app", id: CREATIVE.id, name: "Creative", product: "creative" }, { kind: "approval", title: "x" }, NOW);
+    // the send "takes time": the withdraw lands inside it
+    const callApp = makeCall(() => {
+      assert.equal(store.withdraw(db, { ...CREATIVE }, item.id, "answered elsewhere", NOW + 1).result, "withdrawn");
+    });
+    await alertNewItem(db, callApp as never, item, NOW);
+    assert.deepEqual(delivery(db, item.id), [["failed", "withdrawn"]], label);
+  }
+  // timeout path: the send never answers; the 5 s timer fires after the withdraw
+  const db = memoryDb();
+  alertsOn(db);
+  const item = store.ask(db, { type: "app", id: CREATIVE.id, name: "Creative", product: "creative" }, { kind: "approval", title: "x" }, NOW);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const sending = alertNewItem(db, (() => new Promise(() => {})) as never, item, NOW);
+  assert.equal(store.withdraw(db, { ...CREATIVE }, item.id, undefined, NOW + 1).result, "withdrawn");
+  t.mock.timers.tick(SEND_TIMEOUT_MS);
+  await sending;
+  assert.deepEqual(delivery(db, item.id), [["failed", "withdrawn"]], "timeout");
+  mock.timers.reset();
+});
+
+test("S3-1: no DM is attempted for a withdrawn item (a straggler delivery is skipped by retry and attempt)", async () => {
+  const db = memoryDb();
+  alertsOn(db);
+  const item = store.ask(db, { type: "app", id: CREATIVE.id, name: "Creative", product: "creative" }, { kind: "approval", title: "x" }, NOW);
+  await alertNewItem(db, (async () => ({ status: "held", holdId: "hld_1" })) as never, item, NOW);
+  assert.deepEqual(delivery(db, item.id), [["held", null]]);
+  // a straggler: the item is withdrawn but its delivery was left open (e.g. written after the withdraw)
+  db.prepare("UPDATE inbox_items SET status = 'expired', withdrawn_at = ? WHERE id = ?").run(NOW + 1, item.id);
+  let sends = 0;
+  await retryDue(db, (async () => {
+      sends++;
+      return { status: "ok" };
+    }) as never, NOW + 10 * 60_000);
+  assert.equal(sends, 0, "no companion call for a withdrawn item");
+  assert.deepEqual(delivery(db, item.id), [["held", null]]);
 });

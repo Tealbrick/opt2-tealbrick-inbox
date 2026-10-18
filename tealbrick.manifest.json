@@ -562,7 +562,7 @@
     {
       "id": "item_get",
       "title": "Open an item",
-      "description": "One item with its context, messages, decision, alert deliveries and history (a withdraw by the app or agent that raised it, and refused attempts to withdraw).",
+      "description": "One item with its context, messages, decision, alert deliveries and history (a withdraw by the app or agent that raised it, and refused attempts to withdraw, folded per caller with a count).",
       "input": {
         "type": "object",
         "additionalProperties": false,
@@ -870,6 +870,7 @@
                 "kind",
                 "actor",
                 "detail",
+                "count",
                 "at"
               ],
               "properties": {
@@ -920,6 +921,10 @@
                     "string",
                     "null"
                   ]
+                },
+                "count": {
+                  "type": "integer",
+                  "minimum": 1
                 },
                 "at": {
                   "type": "string"

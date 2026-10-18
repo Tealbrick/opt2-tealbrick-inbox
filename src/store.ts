@@ -93,6 +93,9 @@ export interface ActivityView {
   kind: "withdrawn" | "withdraw_refused";
   actor: { type: From["type"]; id: string; product: string | null; name: string };
   detail: string | null;
+  /** how many identical entries this line stands for (refused attempts of one actor with one cause are folded); 1 for a withdraw */
+  count: number;
+  /** the time of the newest entry of the line */
   at: string;
 }
 
@@ -252,8 +255,14 @@ export interface WithdrawOutcome {
   status: "expired" | "answered" | "unknown";
 }
 
-/** Refused attempts are written to the history at most this often (the answer is the same; the owner needs the trace, not a flood). */
+/**
+ * Refused attempts are written to the history at most this often (the answer is the same; the owner needs the trace, not a flood).
+ * The hourly cap is counted per actor and per class: attempts on ids that do not exist (`unknown_item`) have their own cap,
+ * so junk ids can never use up the budget that records a probe of a real item.
+ */
 export const REFUSAL_PER_ACTOR_HOUR = 20;
+/** item_get shows at most this many refused-attempt lines (newest first by time); withdraw rows are always all shown. */
+export const REFUSAL_LINES_SHOWN = 50;
 export const REFUSAL_SAME_ITEM_MS = 10 * 60_000;
 /** Refused-attempt rows older than this are removed by the background tick. */
 export const REFUSAL_KEEP_MS = 90 * 24 * 3600 * 1000;
@@ -274,7 +283,12 @@ function raisedBy(r: Row, a: Actor): boolean {
 
 /** Writes the audit row of a refused attempt, throttled; the throttle only skips the row, it never changes the answer. */
 export function recordRefusal(db: Db, a: Actor, itemId: string, code: RefusalCode, now: number): void {
-  const recent = Number(db.prepare("SELECT COUNT(*) AS n FROM inbox_activity WHERE actor_id = ? AND kind = 'withdraw_refused' AND created_at > ?").get(a.id, now - 3600_000)?.n ?? 0);
+  const junk = code === "unknown_item";
+  const recent = Number(
+    db
+      .prepare(`SELECT COUNT(*) AS n FROM inbox_activity WHERE actor_id = ? AND kind = 'withdraw_refused' AND created_at > ? AND (detail = 'unknown_item') = ?`)
+      .get(a.id, now - 3600_000, junk ? 1 : 0)?.n ?? 0,
+  );
   if (recent >= REFUSAL_PER_ACTOR_HOUR) return;
   const same = db.prepare("SELECT 1 AS x FROM inbox_activity WHERE actor_id = ? AND item_id = ? AND kind = 'withdraw_refused' AND created_at > ? LIMIT 1").get(a.id, itemId.slice(0, 64), now - REFUSAL_SAME_ITEM_MS);
   if (same) return;
@@ -371,6 +385,40 @@ export function openItems(db: Db, now: number, limit: number): ItemSummary[] {
     .map((r) => toSummary(r, now));
 }
 
+/**
+ * The item history for the owner: every withdraw row, plus the refused attempts folded into one line per actor and cause
+ * (with a count and the newest time), at most REFUSAL_LINES_SHOWN lines, newest first. Oldest line first in the result.
+ */
+function activityOf(db: Db, itemId: string): ActivityView[] {
+  const withdrawn = db
+    .prepare("SELECT id, actor_type, actor_id, actor_product, actor_name, detail, created_at FROM inbox_activity WHERE item_id = ? AND kind = 'withdrawn'")
+    .all(itemId)
+    .map((x) => ({
+      id: String(x.id),
+      kind: "withdrawn" as const,
+      actor: { type: x.actor_type as From["type"], id: String(x.actor_id), product: str(x.actor_product), name: String(x.actor_name) },
+      detail: str(x.detail),
+      count: 1,
+      at: Number(x.created_at),
+    }));
+  const refused = db
+    .prepare(
+      `SELECT MAX(id) AS id, actor_type, actor_id, actor_product, MAX(actor_name) AS actor_name, detail, COUNT(*) AS n, MAX(created_at) AS last
+       FROM inbox_activity WHERE item_id = ? AND kind = 'withdraw_refused'
+       GROUP BY actor_type, actor_id, actor_product, detail ORDER BY last DESC, id DESC LIMIT ?`,
+    )
+    .all(itemId, REFUSAL_LINES_SHOWN)
+    .map((x) => ({
+      id: String(x.id),
+      kind: "withdraw_refused" as const,
+      actor: { type: x.actor_type as From["type"], id: String(x.actor_id), product: str(x.actor_product), name: String(x.actor_name) },
+      detail: str(x.detail),
+      count: Number(x.n),
+      at: Number(x.last),
+    }));
+  return [...withdrawn, ...refused].sort((p, q) => p.at - q.at || (p.id < q.id ? -1 : p.id > q.id ? 1 : 0)).map((x) => ({ ...x, at: iso(x.at) }));
+}
+
 export function get(db: Db, itemId: string, now: number): ItemDetail {
   const r = row(db, itemId);
   if (!r) notFound();
@@ -391,16 +439,7 @@ export function get(db: Db, itemId: string, now: number): ItemDetail {
       attempts: Number(x.attempts),
       updatedAt: iso(x.updated_at),
     }));
-  const activity = db
-    .prepare("SELECT id, kind, actor_type, actor_id, actor_product, actor_name, detail, created_at FROM inbox_activity WHERE item_id = ? ORDER BY created_at ASC, id ASC")
-    .all(itemId)
-    .map((x) => ({
-      id: String(x.id),
-      kind: x.kind as ActivityView["kind"],
-      actor: { type: x.actor_type as From["type"], id: String(x.actor_id), product: str(x.actor_product), name: String(x.actor_name) },
-      detail: str(x.detail),
-      at: iso(x.created_at),
-    }));
+  const activity = activityOf(db, itemId);
   return {
     ...toSummary(r, now),
     context: str(r.context),

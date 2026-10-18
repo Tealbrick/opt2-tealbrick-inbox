@@ -265,8 +265,8 @@ describe("Withdrawn item (inbox_withdraw)", () => {
       withdrawn: true,
       withdrawal: { at: now, reason: MARKUP },
       activity: [
-        { id: "act_1", kind: "withdraw_refused", actor: { type: "app", id: "ins_2", product: "kanban", name: "Task Board" }, detail: "not_raiser", at: now },
-        { id: "act_2", kind: "withdrawn", actor: { type: "app", id: "ins_1", product: "creative", name: "Creative" }, detail: MARKUP, at: now },
+        { id: "act_1", kind: "withdraw_refused", actor: { type: "app", id: "ins_2", product: "kanban", name: "Task Board" }, detail: "not_raiser", count: 1, at: now },
+        { id: "act_2", kind: "withdrawn", actor: { type: "app", id: "ins_1", product: "creative", name: "Creative" }, detail: MARKUP, count: 1, at: now },
       ],
       ...over,
     });
@@ -288,11 +288,11 @@ describe("Withdrawn item (inbox_withdraw)", () => {
   });
 
   it("the item history names the withdraw and the refused attempt with the verified product, and escapes every value", async () => {
-    reset({ items_list: { items: [], nextCursor: null, counts: { pending: 0, snoozed: 0 } }, item_get: withdrawn({ activity: [{ id: "act_3", kind: "withdraw_refused", actor: { type: "app", id: "ins_2", product: "kanban", name: "<script>x</script>Board" }, detail: "not_raiser", at: now }, { id: "act_4", kind: "withdrawn", actor: { type: "app", id: "ins_1", product: "creative", name: "Creative" }, detail: null, at: now }] }) });
+    reset({ items_list: { items: [], nextCursor: null, counts: { pending: 0, snoozed: 0 } }, item_get: withdrawn({ activity: [{ id: "act_3", kind: "withdraw_refused", actor: { type: "app", id: "ins_2", product: "kanban", name: "<script>x</script>Board" }, detail: "not_raiser", count: 7, at: now }, { id: "act_4", kind: "withdrawn", actor: { type: "app", id: "ins_1", product: "creative", name: "Creative" }, detail: null, count: 1, at: now }] }) });
     const m = await mount(inbox());
     const lines = [...m.host.querySelectorAll('.msgs[aria-label="History"] li')].map((li) => li.textContent ?? "");
     assert.equal(lines.length, 2);
-    assert.match(lines[0] ?? "", /^Withdraw refused for <script>x<\/script>Board \(kanban\).*not the caller that raised this item$/);
+    assert.match(lines[0] ?? "", /^Withdraw refused for <script>x<\/script>Board \(kanban\).*not the caller that raised this item \(7 attempts\)$/);
     assert.match(lines[1] ?? "", /^Withdrawn by Creative/);
     assert.equal(m.host.querySelector(".msgs script"), null);
     await m.unmount();

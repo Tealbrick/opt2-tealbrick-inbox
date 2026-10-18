@@ -76,7 +76,12 @@ function ActivityLine({ a, owner }: { a: Activity; owner: string }) {
   return (
     <li>
       <b>{a.kind === "withdrawn" ? `Withdrawn by ${owner}` : `Withdraw refused for ${who}`}</b> <span className="meta">{ago(a.at)}</span>
-      {a.kind === "withdraw_refused" ? <p>{REFUSAL_TEXT[a.detail ?? ""] ?? "refused"}</p> : null}
+      {a.kind === "withdraw_refused" ? (
+        <p>
+          {REFUSAL_TEXT[a.detail ?? ""] ?? "refused"}
+          {a.count > 1 ? ` (${a.count} attempts)` : ""}
+        </p>
+      ) : null}
     </li>
   );
 }
