@@ -68,6 +68,20 @@ const overview = {
   errors: [{ product: "rules", code: "app_unavailable" }],
 };
 
+const metricsFor = (days: 7 | 30, over: Record<string, unknown> = {}) => ({
+  window: { from: "2026-10-11T12:00:00.000Z", to: "2026-10-18T12:00:00.000Z", days },
+  asked: days === 7 ? 12 : 40,
+  answered: days === 7 ? 8 : 31,
+  expired: 2,
+  withdrawn: 1,
+  open: 1,
+  timeToDecision: { n: 8, p50S: 240, p90S: 7_200 },
+  expiryRate: 0.2,
+  reAskRate: 0.0833,
+  byRaiser: [],
+  ...over,
+});
+
 interface Stub {
   calls: { op: string; input: Record<string, unknown> }[];
   fail: Record<string, { status: number; code: string; message?: string } | undefined>;
@@ -82,7 +96,7 @@ const reset = (answers: Record<string, unknown> = {}) => {
   stub.fail = {};
   stub.gate = {};
   stub.networkDown = false;
-  stub.answers = { item_get: item(), holds_overview: overview, alerts_get: { dm: "buzz", buzzTo: "npub1abc", channelAccount: null, channelPerson: null }, alerts_set: { dm: "buzz", buzzTo: "npub1abc", channelAccount: null, channelPerson: null }, item_decide: {}, item_ack: item(), item_priority: item(), item_snooze: item(), ...answers };
+  stub.answers = { item_get: item(), holds_overview: overview, alerts_get: { dm: "buzz", buzzTo: "npub1abc", channelAccount: null, channelPerson: null }, alerts_set: { dm: "buzz", buzzTo: "npub1abc", channelAccount: null, channelPerson: null }, inbox_metrics: metricsFor(7), item_decide: {}, item_ack: item(), item_priority: item(), item_snooze: item(), ...answers };
 };
 
 globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -390,11 +404,79 @@ describe("Settings", () => {
     stub.fail.alerts_get = { status: 500, code: "internal_error" };
     const m = await mount(h(pages.SettingsPage, {}));
     assert.match(alerts(m.host)[0] ?? "", /Something went wrong/);
-    assert.equal(m.host.querySelector(".tb-section"), null);
+    const headings = () => [...m.host.querySelectorAll(".tb-section h2")].map((x) => x.textContent);
+    assert.ok(!headings().includes("Alerts"));
     stub.fail.alerts_get = undefined;
     await click(button(m.host, "Try again"));
     await flush();
-    assert.ok(m.host.querySelector(".tb-section"));
+    assert.ok(headings().includes("Alerts"));
+    await m.unmount();
+  });
+});
+
+describe("Settings: Activity", () => {
+  const rows = (host: Element) => Object.fromEntries([...host.querySelectorAll("dl.kv dt")].map((dt) => [dt.textContent, dt.nextElementSibling?.textContent]));
+  const metricCalls = () => stub.calls.filter((c) => c.op === "inbox_metrics");
+
+  it("shows the counts, the times in words and the rates as percentages; the first load asks for 7 days", async () => {
+    reset();
+    const m = await mount(h(pages.SettingsPage, {}));
+    assert.deepEqual(metricCalls().map((c) => c.input), [{ days: 7 }]);
+    assert.deepEqual(rows(m.host), {
+      Asked: "12",
+      Answered: "8",
+      Expired: "2",
+      Withdrawn: "1",
+      Open: "1",
+      "Time to decision, median": "4 min",
+      "Time to decision, 90th percentile": "2 h",
+      "Expiry rate": "20%",
+      "Re-ask rate": "8.3%",
+    });
+    assert.deepEqual(alerts(m.host), []);
+    await m.unmount();
+  });
+
+  it("shows a dash for every value that is null (no decisions, nothing to divide by)", async () => {
+    reset({ inbox_metrics: metricsFor(7, { asked: 0, answered: 0, expired: 0, withdrawn: 0, open: 0, timeToDecision: { n: 0, p50S: null, p90S: null }, expiryRate: null, reAskRate: null }) });
+    const m = await mount(h(pages.SettingsPage, {}));
+    const r = rows(m.host);
+    assert.equal(r.Asked, "0");
+    for (const k of ["Time to decision, median", "Time to decision, 90th percentile", "Expiry rate", "Re-ask rate"]) assert.equal(r[k], "—", k);
+    await m.unmount();
+  });
+
+  it("the 30 days toggle sends days 30 and shows that window; 7 days goes back", async () => {
+    reset({ inbox_metrics: metricsFor(7) });
+    const m = await mount(h(pages.SettingsPage, {}));
+    stub.answers.inbox_metrics = metricsFor(30);
+    const seg = (label: string) => button(m.host, label);
+    assert.equal(seg("7 days").getAttribute("aria-pressed"), "true");
+    await click(seg("30 days"));
+    await flush();
+    assert.deepEqual(metricCalls().at(-1)?.input, { days: 30 });
+    assert.equal(seg("30 days").getAttribute("aria-pressed"), "true");
+    assert.equal(rows(m.host).Asked, "40");
+    stub.answers.inbox_metrics = metricsFor(7);
+    await click(seg("7 days"));
+    await flush();
+    assert.deepEqual(metricCalls().at(-1)?.input, { days: 7 });
+    assert.equal(rows(m.host).Asked, "12");
+    await m.unmount();
+  });
+
+  it("RUL-14: a failed load is an alert with Try again, not zeros; Try again loads it; the alert settings stay usable", async () => {
+    reset();
+    stub.fail.inbox_metrics = { status: 500, code: "internal_error" };
+    const m = await mount(h(pages.SettingsPage, {}));
+    assert.match(alerts(m.host)[0] ?? "", /Something went wrong/);
+    assert.equal(m.host.querySelector("dl.kv"), null, "no numbers that look like nothing happened");
+    assert.ok(button(m.host, "Save"), "the Alerts section is still there");
+    stub.fail.inbox_metrics = undefined;
+    await click(button(m.host, "Try again"));
+    await flush();
+    assert.equal(rows(m.host).Asked, "12");
+    assert.deepEqual(alerts(m.host), []);
     await m.unmount();
   });
 });
