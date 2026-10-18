@@ -306,6 +306,70 @@
       "audience": "agent"
     },
     {
+      "id": "inbox_withdraw",
+      "title": "Withdraw your item",
+      "description": "Close one of your own open items that is no longer needed, for example because the question was answered somewhere else. Only the caller that raised the item can do this (an app must be the same app instance and product that asked); any other caller gets result unknown, exactly as for an id that does not exist. The item then reads as expired and the owner sees it as withdrawn, with your reason. Calling it again returns the same answer. An item that is already answered or expired answers not_open and is not changed. Never treat a withdrawn item as an approval.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "itemId"
+        ],
+        "properties": {
+          "itemId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500,
+            "description": "Why the item is no longer needed; the owner reads it in the item history."
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "itemId",
+          "result",
+          "status"
+        ],
+        "properties": {
+          "itemId": {
+            "type": "string"
+          },
+          "result": {
+            "type": "string",
+            "enum": [
+              "withdrawn",
+              "not_open",
+              "unknown"
+            ],
+            "description": "withdrawn: the item is closed (also on a repeat). not_open: it was already answered or expired. unknown: no such item of yours."
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "expired",
+              "answered",
+              "unknown"
+            ],
+            "description": "The item as inbox_status shows it to you after this call."
+          }
+        }
+      },
+      "crud": [
+        "update"
+      ],
+      "effect": "write",
+      "idempotency": "supported",
+      "receipt": true,
+      "audience": "agent"
+    },
+    {
       "id": "items_list",
       "title": "List inbox items",
       "description": "Items for the owner: pending (open, not snoozed; urgent first, then oldest), snoozed, done, or all.",
@@ -359,6 +423,7 @@
                 "snoozedUntil",
                 "response",
                 "version",
+                "withdrawn",
                 "createdAt",
                 "updatedAt",
                 "expiresAt"
@@ -445,6 +510,9 @@
                   "type": "integer",
                   "minimum": 1
                 },
+                "withdrawn": {
+                  "type": "boolean"
+                },
                 "createdAt": {
                   "type": "string"
                 },
@@ -494,7 +562,7 @@
     {
       "id": "item_get",
       "title": "Open an item",
-      "description": "One item with its context, messages, decision and alert deliveries.",
+      "description": "One item with its context, messages, decision, alert deliveries and history (a withdraw by the app or agent that raised it, and refused attempts to withdraw, folded per caller with a count).",
       "input": {
         "type": "object",
         "additionalProperties": false,
@@ -523,6 +591,7 @@
           "snoozedUntil",
           "response",
           "version",
+          "withdrawn",
           "createdAt",
           "updatedAt",
           "expiresAt",
@@ -530,7 +599,9 @@
           "responses",
           "messages",
           "decision",
-          "deliveries"
+          "deliveries",
+          "withdrawal",
+          "activity"
         ],
         "properties": {
           "id": {
@@ -613,6 +684,9 @@
           "version": {
             "type": "integer",
             "minimum": 1
+          },
+          "withdrawn": {
+            "type": "boolean"
           },
           "createdAt": {
             "type": "string"
@@ -759,6 +833,100 @@
                   "minimum": 0
                 },
                 "updatedAt": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "withdrawal": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": false,
+            "required": [
+              "at",
+              "reason"
+            ],
+            "properties": {
+              "at": {
+                "type": "string"
+              },
+              "reason": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
+          "activity": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "kind",
+                "actor",
+                "detail",
+                "count",
+                "at"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "withdrawn",
+                    "withdraw_refused"
+                  ]
+                },
+                "actor": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "id",
+                    "product",
+                    "name"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "enum": [
+                        "agent",
+                        "app",
+                        "person"
+                      ]
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "product": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "name": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "detail": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "count": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "at": {
                   "type": "string"
                 }
               }

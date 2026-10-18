@@ -43,6 +43,7 @@ const item = (over: Record<string, unknown> = {}) => ({
   snoozedUntil: null,
   response: null,
   version: 1,
+  withdrawn: false,
   createdAt: now,
   updatedAt: now,
   expiresAt: later,
@@ -51,6 +52,8 @@ const item = (over: Record<string, unknown> = {}) => ({
   messages: [],
   decision: null,
   deliveries: [],
+  withdrawal: null,
+  activity: [],
   ...over,
 });
 const overview = {
@@ -249,6 +252,66 @@ describe("Inbox list", () => {
     await click(button(m.host, "Try again"));
     await flush();
     assert.equal(m.host.querySelectorAll(".inbox-row").length, 1);
+    await m.unmount();
+  });
+});
+
+describe("Withdrawn item (inbox_withdraw)", () => {
+  const MARKUP = `<img src=x onerror="globalThis.__pwned = 1"> Answered in <b>Creative</b>`;
+  const withdrawn = (over: Record<string, unknown> = {}) =>
+    item({
+      from: { type: "app", id: "ins_1", name: "Creative" },
+      status: "expired",
+      withdrawn: true,
+      withdrawal: { at: now, reason: MARKUP },
+      activity: [
+        { id: "act_1", kind: "withdraw_refused", actor: { type: "app", id: "ins_2", product: "kanban", name: "Task Board" }, detail: "not_raiser", count: 1, at: now },
+        { id: "act_2", kind: "withdrawn", actor: { type: "app", id: "ins_1", product: "creative", name: "Creative" }, detail: MARKUP, count: 1, at: now },
+      ],
+      ...over,
+    });
+
+  it("shows Withdrawn by <app label> with the reason as text (escaped), no answer buttons, and no timeout notice", async () => {
+    reset({ items_list: { items: [], nextCursor: null, counts: { pending: 0, snoozed: 0 } }, item_get: withdrawn() });
+    const m = await mount(inbox());
+    const detail = m.host.querySelector(".detail");
+    assert.ok(detail);
+    const notice = detail.querySelector(".tb-notice");
+    assert.match(notice?.textContent ?? "", /^Withdrawn by Creative .*\. It no longer needs an answer\. Reason: /);
+    assert.ok(notice?.textContent?.includes(MARKUP), "the reason is shown as written");
+    assert.equal(detail.querySelector("img"), null, "agent-supplied markup is never parsed");
+    assert.equal((globalThis as Record<string, unknown>).__pwned, undefined);
+    assert.ok([...detail.querySelectorAll(".tb-tag")].some((t) => t.textContent === "withdrawn"));
+    assert.doesNotMatch(detail.textContent ?? "", /expired before it was answered/);
+    for (const label of ["Approve", "Deny", "Ask for clarification", "Mark as seen"]) assert.ok(![...detail.querySelectorAll("button")].some((b) => b.textContent?.trim() === label), `${label} is gone`);
+    await m.unmount();
+  });
+
+  it("the item history names the withdraw and the refused attempt with the verified product, and escapes every value", async () => {
+    reset({ items_list: { items: [], nextCursor: null, counts: { pending: 0, snoozed: 0 } }, item_get: withdrawn({ activity: [{ id: "act_3", kind: "withdraw_refused", actor: { type: "app", id: "ins_2", product: "kanban", name: "<script>x</script>Board" }, detail: "not_raiser", count: 7, at: now }, { id: "act_4", kind: "withdrawn", actor: { type: "app", id: "ins_1", product: "creative", name: "Creative" }, detail: null, count: 1, at: now }] }) });
+    const m = await mount(inbox());
+    const lines = [...m.host.querySelectorAll('.msgs[aria-label="History"] li')].map((li) => li.textContent ?? "");
+    assert.equal(lines.length, 2);
+    assert.match(lines[0] ?? "", /^Withdraw refused for <script>x<\/script>Board \(kanban\).*not the caller that raised this item \(7 attempts\)$/);
+    assert.match(lines[1] ?? "", /^Withdrawn by Creative/);
+    assert.equal(m.host.querySelector(".msgs script"), null);
+    await m.unmount();
+  });
+
+  it("a timed-out item (not withdrawn) still shows the timeout notice and no history", async () => {
+    reset({ items_list: { items: [], nextCursor: null, counts: { pending: 0, snoozed: 0 } }, item_get: item({ status: "expired" }) });
+    const m = await mount(inbox());
+    assert.match(m.host.querySelector(".detail")?.textContent ?? "", /This item expired before it was answered/);
+    assert.equal(m.host.querySelector('.msgs[aria-label="History"]'), null);
+    await m.unmount();
+  });
+
+  it("the list row of a withdrawn item reads Withdrawn, not Expired", async () => {
+    reset({ items_list: { items: [withdrawn(), item({ id: "itm_02", status: "expired" })], nextCursor: null, counts: { pending: 0, snoozed: 0 } } });
+    const m = await mount(h(pages.InboxPage, { selected: null, onSelect: () => {}, onCounts: () => {}, hrefOf: (id: string) => `items/${id}` }));
+    const tags = [...m.host.querySelectorAll(".inbox-row")].map((r) => [...r.querySelectorAll(".tb-tag")].map((t) => t.textContent).join(","));
+    assert.ok(tags[0]?.includes("Withdrawn"), tags.join(" | "));
+    assert.ok(tags[1]?.includes("Expired") && !tags[1].includes("Withdrawn"), tags.join(" | "));
     await m.unmount();
   });
 });

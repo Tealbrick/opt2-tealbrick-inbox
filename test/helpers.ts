@@ -1,12 +1,26 @@
 // Test helpers: a migrated in-memory database shaped like the SDK's Db (transactions roll back on throw, as the
 // SDK's do), and a minimal OpContext for calling handlers directly.
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import type { Db, Json, OpContext } from "@opt2-tealbrick/miniapp-sdk";
 
-export function memoryDb(): Db {
+const MIGRATIONS = new URL("../migrations/", import.meta.url);
+
+/** An in-memory database with every migration applied in order (`upTo`: only the migrations up to that number, for upgrade tests). */
+export function memoryDb(upTo = Number.POSITIVE_INFINITY): Db {
   const raw = new DatabaseSync(":memory:");
-  raw.exec(readFileSync(new URL("../migrations/0001_init.sql", import.meta.url), "utf8"));
+  for (const f of readdirSync(MIGRATIONS).filter((x) => /^\d{4}_.*\.sql$/.test(x)).sort()) if (Number(f.slice(0, 4)) <= upTo) raw.exec(readFileSync(new URL(f, MIGRATIONS), "utf8"));
+  return shaped(raw);
+}
+
+/** Applies one migration file by number to an existing database (the upgrade step). */
+export function migrate(db: Db, n: number): void {
+  const f = readdirSync(MIGRATIONS).find((x) => x.startsWith(String(n).padStart(4, "0")));
+  if (!f) throw new Error(`no migration ${n}`);
+  db.exec(readFileSync(new URL(f, MIGRATIONS), "utf8"));
+}
+
+function shaped(raw: DatabaseSync): Db {
   let depth = 0;
   return {
     exec: (sql: string) => raw.exec(sql),
@@ -50,7 +64,7 @@ export interface CtxExtras {
   status?: { pushes: number };
 }
 
-export function ctxFor(db: Db, caller: { type: string; id: string; name: string; mode: string }, callApp?: CallApp, x: CtxExtras = {}): OpContext {
+export function ctxFor(db: Db, caller: { type: string; id: string; name: string; mode: string; product?: string }, callApp?: CallApp, x: CtxExtras = {}): OpContext {
   const noApp: CallApp = async () => {
     throw Object.assign(new Error("no grant"), { code: "no_grant" });
   };

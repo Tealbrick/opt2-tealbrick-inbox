@@ -31,6 +31,15 @@ export interface From {
   name: string;
 }
 
+/**
+ * The VERIFIED caller of an agent op, as the SDK hands it over (ctx.caller): the type, the id (agent id or app
+ * instance id) and, for an app, the product from the verified grant. `name` is display text and never an identity.
+ */
+export interface Actor extends From {
+  /** the verified product of an app caller; null for an agent and for an app whose product is not known */
+  product: string | null;
+}
+
 export interface ItemSummary {
   id: string;
   kind: Kind;
@@ -42,6 +51,8 @@ export interface ItemSummary {
   snoozedUntil: string | null;
   response: Response | null;
   version: number;
+  /** closed by its raiser through inbox_withdraw (status is `expired`) */
+  withdrawn: boolean;
   createdAt: string;
   updatedAt: string;
   expiresAt: string;
@@ -71,12 +82,31 @@ export interface DeliveryView {
   updatedAt: string;
 }
 
+export interface Withdrawal {
+  at: string;
+  reason: string | null;
+}
+
+/** One line of the item history: a withdraw, or a refused attempt to withdraw (the caller as the SDK verified it). */
+export interface ActivityView {
+  id: string;
+  kind: "withdrawn" | "withdraw_refused";
+  actor: { type: From["type"]; id: string; product: string | null; name: string };
+  detail: string | null;
+  /** how many identical entries this line stands for (refused attempts of one actor with one cause are folded); 1 for a withdraw */
+  count: number;
+  /** the time of the newest entry of the line */
+  at: string;
+}
+
 export interface ItemDetail extends ItemSummary {
   context: string | null;
   responses: Response[];
   messages: Message[];
   decision: Decision | null;
   deliveries: DeliveryView[];
+  withdrawal: Withdrawal | null;
+  activity: ActivityView[];
 }
 
 type Row = Record<string, unknown>;
@@ -101,6 +131,7 @@ function toSummary(r: Row, now: number): ItemSummary {
     snoozedUntil: r.status === "open" && snoozed !== null && snoozed > now ? iso(snoozed) : null,
     response: (str(r.response) as Response | null) ?? null,
     version: Number(r.version),
+    withdrawn: r.withdrawn_at !== null && r.withdrawn_at !== undefined,
     createdAt: iso(r.created_at),
     updatedAt: iso(r.updated_at),
     expiresAt: iso(r.expires_at),
@@ -129,7 +160,8 @@ export interface AskInput {
   expiresInS?: number;
 }
 
-export function ask(db: Db, from: From, input: AskInput, now: number): ItemSummary {
+/** `from.product` (an app's VERIFIED product) is recorded with the item: inbox_withdraw matches on it. */
+export function ask(db: Db, from: From & { product?: string | null }, input: AskInput, now: number): ItemSummary {
   const allowed = KIND_RESPONSES[input.kind];
   const responses = input.responses ?? [...allowed];
   const wrong = responses.filter((r) => !allowed.includes(r));
@@ -143,9 +175,23 @@ export function ask(db: Db, from: From, input: AskInput, now: number): ItemSumma
   const id = `itm_${ulid(now)}`;
   const expiresAt = now + (input.expiresInS ?? DEFAULT_EXPIRY_S) * 1000;
   db.prepare(
-    `INSERT INTO inbox_items (id, kind, title, context, responses, from_type, from_id, from_name, status, priority, version, acked_at, snoozed_until, created_at, updated_at, expires_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, 1, NULL, NULL, ?, ?, ?)`,
-  ).run(id, input.kind, input.title, input.context ?? null, JSON.stringify(responses), from.type, from.id, from.name, input.priority ?? "normal", now, now, expiresAt);
+    `INSERT INTO inbox_items (id, kind, title, context, responses, from_type, from_id, from_name, from_product, status, priority, version, acked_at, snoozed_until, created_at, updated_at, expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, 1, NULL, NULL, ?, ?, ?)`,
+  ).run(
+    id,
+    input.kind,
+    input.title,
+    input.context ?? null,
+    JSON.stringify(responses),
+    from.type,
+    from.id,
+    from.name,
+    from.type === "app" ? (from.product ?? null) : null,
+    input.priority ?? "normal",
+    now,
+    now,
+    expiresAt,
+  );
   return toSummary(row(db, id) as Row, now);
 }
 
@@ -198,6 +244,108 @@ export function reply(db: Db, callerId: string, itemId: string, body: string, no
   });
 }
 
+// ── withdraw (OD-1) ──
+
+export const WITHDRAW_RESULTS = ["withdrawn", "not_open", "unknown"] as const;
+export type WithdrawResult = (typeof WITHDRAW_RESULTS)[number];
+export interface WithdrawOutcome {
+  itemId: string;
+  result: WithdrawResult;
+  /** the item as inbox_status would show it to this caller after the call */
+  status: "expired" | "answered" | "unknown";
+}
+
+/**
+ * Refused attempts are written to the history at most this often (the answer is the same; the owner needs the trace, not a flood).
+ * The hourly cap is counted per actor and per class: attempts on ids that do not exist (`unknown_item`) have their own cap,
+ * so junk ids can never use up the budget that records a probe of a real item.
+ */
+export const REFUSAL_PER_ACTOR_HOUR = 20;
+/** item_get shows at most this many refused-attempt lines (newest first by time); withdraw rows are always all shown. */
+export const REFUSAL_LINES_SHOWN = 50;
+export const REFUSAL_SAME_ITEM_MS = 10 * 60_000;
+/** Refused-attempt rows older than this are removed by the background tick. */
+export const REFUSAL_KEEP_MS = 90 * 24 * 3600 * 1000;
+const DETAIL_MAX = 500;
+
+export type RefusalCode = "unknown_item" | "not_raiser" | "no_product";
+
+/**
+ * Only the RAISER may withdraw. The match is on the verified identity recorded by inbox_ask: the same type and the
+ * same id (agent id or app instance id); for an app also the same verified PRODUCT. An item whose product was never
+ * recorded (raised before migration 0002), and a caller without a product, never match an app (fail closed).
+ */
+function raisedBy(r: Row, a: Actor): boolean {
+  if (a.type === "person" || r.from_type !== a.type || r.from_id !== a.id) return false;
+  if (a.type === "agent") return true;
+  return a.product !== null && a.product !== "" && r.from_product !== null && r.from_product !== undefined && r.from_product === a.product;
+}
+
+/** Writes the audit row of a refused attempt, throttled; the throttle only skips the row, it never changes the answer. */
+export function recordRefusal(db: Db, a: Actor, itemId: string, code: RefusalCode, now: number): void {
+  const junk = code === "unknown_item";
+  const recent = Number(
+    db
+      .prepare(`SELECT COUNT(*) AS n FROM inbox_activity WHERE actor_id = ? AND kind = 'withdraw_refused' AND created_at > ? AND (detail = 'unknown_item') = ?`)
+      .get(a.id, now - 3600_000, junk ? 1 : 0)?.n ?? 0,
+  );
+  if (recent >= REFUSAL_PER_ACTOR_HOUR) return;
+  const same = db.prepare("SELECT 1 AS x FROM inbox_activity WHERE actor_id = ? AND item_id = ? AND kind = 'withdraw_refused' AND created_at > ? LIMIT 1").get(a.id, itemId.slice(0, 64), now - REFUSAL_SAME_ITEM_MS);
+  if (same) return;
+  db.prepare("INSERT INTO inbox_activity (id, item_id, kind, actor_type, actor_id, actor_product, actor_name, detail, created_at) VALUES (?, ?, 'withdraw_refused', ?, ?, ?, ?, ?, ?)").run(
+    `act_${ulid(now)}`,
+    itemId.slice(0, 64),
+    a.type,
+    a.id,
+    a.product,
+    a.name,
+    code,
+    now,
+  );
+}
+
+/** Removes old refused-attempt rows (withdraw rows are the item's history and stay). */
+export function pruneActivity(db: Db, now: number): number {
+  return Number(db.prepare("DELETE FROM inbox_activity WHERE kind = 'withdraw_refused' AND created_at < ?").run(now - REFUSAL_KEEP_MS).changes);
+}
+
+/**
+ * Closes an OPEN item its raiser created: status `expired`, the reason kept, one history row, unsent alerts stopped.
+ * The answer for a caller that is not the raiser is exactly the answer for an id that does not exist (`unknown`, no
+ * oracle). Idempotent: a second withdraw of the same item answers `withdrawn` again and changes nothing (the first
+ * reason and the first history row stay). An item that is already answered, or expired by time, answers `not_open`
+ * with its status. One transaction; the guarded UPDATE is the real guard.
+ */
+export function withdraw(db: Db, a: Actor, itemId: string, reason: string | undefined, now: number): WithdrawOutcome {
+  return db.transaction(() => {
+    const r = row(db, itemId);
+    if (!r || !raisedBy(r, a)) {
+      recordRefusal(db, a, itemId, r ? "not_raiser" : "unknown_item", now);
+      return { itemId, result: "unknown" as const, status: "unknown" as const };
+    }
+    if (r.withdrawn_at !== null && r.withdrawn_at !== undefined) return { itemId, result: "withdrawn" as const, status: "expired" as const };
+    if (r.status !== "open" || Number(r.expires_at) <= now) return { itemId, result: "not_open" as const, status: r.status === "answered" ? ("answered" as const) : ("expired" as const) };
+    const why = reason?.trim() ? reason.trim().slice(0, DETAIL_MAX) : null;
+    const changed = db
+      .prepare("UPDATE inbox_items SET status = 'expired', withdrawn_at = ?, withdrawn_reason = ?, expires_at = MIN(expires_at, ?), snoozed_until = NULL, updated_at = ? WHERE id = ? AND status = 'open' AND expires_at > ?")
+      .run(now, why, now, now, itemId, now).changes;
+    if (changed !== 1) return { itemId, result: "not_open" as const, status: "expired" as const };
+    db.prepare("INSERT INTO inbox_activity (id, item_id, kind, actor_type, actor_id, actor_product, actor_name, detail, created_at) VALUES (?, ?, 'withdrawn', ?, ?, ?, ?, ?, ?)").run(
+      `act_${ulid(now)}`,
+      itemId,
+      a.type,
+      a.id,
+      a.product,
+      a.name,
+      why,
+      now,
+    );
+    // an alert that has not been sent yet is moot now; a sent one cannot be taken back
+    db.prepare("UPDATE inbox_deliveries SET status = 'failed', error = 'withdrawn', updated_at = ? WHERE item_id = ? AND status IN ('pending', 'held')").run(now, itemId);
+    return { itemId, result: "withdrawn" as const, status: "expired" as const };
+  });
+}
+
 // ── owner side ──
 
 export type View = "pending" | "snoozed" | "done" | "all";
@@ -237,6 +385,40 @@ export function openItems(db: Db, now: number, limit: number): ItemSummary[] {
     .map((r) => toSummary(r, now));
 }
 
+/**
+ * The item history for the owner: every withdraw row, plus the refused attempts folded into one line per actor and cause
+ * (with a count and the newest time), at most REFUSAL_LINES_SHOWN lines, newest first. Oldest line first in the result.
+ */
+function activityOf(db: Db, itemId: string): ActivityView[] {
+  const withdrawn = db
+    .prepare("SELECT id, actor_type, actor_id, actor_product, actor_name, detail, created_at FROM inbox_activity WHERE item_id = ? AND kind = 'withdrawn'")
+    .all(itemId)
+    .map((x) => ({
+      id: String(x.id),
+      kind: "withdrawn" as const,
+      actor: { type: x.actor_type as From["type"], id: String(x.actor_id), product: str(x.actor_product), name: String(x.actor_name) },
+      detail: str(x.detail),
+      count: 1,
+      at: Number(x.created_at),
+    }));
+  const refused = db
+    .prepare(
+      `SELECT MAX(id) AS id, actor_type, actor_id, actor_product, MAX(actor_name) AS actor_name, detail, COUNT(*) AS n, MAX(created_at) AS last
+       FROM inbox_activity WHERE item_id = ? AND kind = 'withdraw_refused'
+       GROUP BY actor_type, actor_id, actor_product, detail ORDER BY last DESC, id DESC LIMIT ?`,
+    )
+    .all(itemId, REFUSAL_LINES_SHOWN)
+    .map((x) => ({
+      id: String(x.id),
+      kind: "withdraw_refused" as const,
+      actor: { type: x.actor_type as From["type"], id: String(x.actor_id), product: str(x.actor_product), name: String(x.actor_name) },
+      detail: str(x.detail),
+      count: Number(x.n),
+      at: Number(x.last),
+    }));
+  return [...withdrawn, ...refused].sort((p, q) => p.at - q.at || (p.id < q.id ? -1 : p.id > q.id ? 1 : 0)).map((x) => ({ ...x, at: iso(x.at) }));
+}
+
 export function get(db: Db, itemId: string, now: number): ItemDetail {
   const r = row(db, itemId);
   if (!r) notFound();
@@ -257,6 +439,7 @@ export function get(db: Db, itemId: string, now: number): ItemDetail {
       attempts: Number(x.attempts),
       updatedAt: iso(x.updated_at),
     }));
+  const activity = activityOf(db, itemId);
   return {
     ...toSummary(r, now),
     context: str(r.context),
@@ -264,6 +447,8 @@ export function get(db: Db, itemId: string, now: number): ItemDetail {
     messages,
     decision: d ? { response: String(d.response) as Response, message: str(d.message), decidedBy: String(d.decided_by), decidedAt: iso(d.decided_at) } : null,
     deliveries,
+    withdrawal: r.withdrawn_at !== null && r.withdrawn_at !== undefined ? { at: iso(r.withdrawn_at), reason: str(r.withdrawn_reason) } : null,
+    activity,
   };
 }
 

@@ -3,7 +3,8 @@
 // manifest operation id. Op ids and input/output types come from the kit `tb-gen kit` generates (`#kit`).
 //
 // Agent side: inbox_ask (create an item; idempotency is the SDK's: same key + same input → the first result,
-// different input → 409), inbox_status (poll the answer), inbox_reply (add to an open item).
+// different input → 409), inbox_status (poll the answer), inbox_reply (add to an open item), inbox_withdraw (the
+// raiser closes its own open item; an app is matched on the verified product and instance, never on a name).
 // Owner side (person session = the workspace owner only, SDK-API §5): list/get, decide, snooze, priority, ack,
 // holds overview and the alert setting.
 import { readFileSync } from "node:fs";
@@ -22,6 +23,8 @@ import {
   type InboxReplyOutput,
   type InboxStatusInput,
   type InboxStatusOutput,
+  type InboxWithdrawInput,
+  type InboxWithdrawOutput,
   type ItemAckInput,
   type ItemAckOutput,
   type ItemDecideInput,
@@ -64,6 +67,7 @@ export const TICK_MS = 60_000;
 export async function tick(ctx: Pick<StartContext, "db" | "log" | "callApp" | "statusChanged">, now = clock.now()): Promise<void> {
   try {
     if (store.expireDue(ctx.db, now) > 0) ctx.statusChanged();
+    store.pruneActivity(ctx.db, now);
     await retryDue(ctx.db, ctx.callApp, now);
   } catch (e) {
     ctx.log.warn("inbox tick failed", { error: e instanceof Error ? e.message : "unknown" });
@@ -74,6 +78,16 @@ export async function tick(ctx: Pick<StartContext, "db" | "log" | "callApp" | "s
 function owner(ctx: OpContext): string {
   if (ctx.caller.type !== "person") throw new TbError("owner_only", "Only the workspace owner can do this.", 403);
   return ctx.caller.id;
+}
+
+/**
+ * The verified caller of an agent op. An app's product comes from `ctx.caller.product` (the SDK takes it from the verified
+ * grant, miniapp-sdk 0.1.28); it is never read from the name or from the input. Absent or empty → null.
+ */
+function actorOf(ctx: OpContext): store.Actor {
+  const c = ctx.caller;
+  const product = c.type === "app" && typeof c.product === "string" && c.product !== "" ? c.product : null;
+  return { type: c.type, id: c.id, name: c.name, product };
 }
 
 /** Retries due alert sends; an alert problem never fails the op that triggered the retry. */
@@ -92,7 +106,7 @@ export const handlers = {
     redact: (input) => clip(`${input.kind}: ${input.title}`, 280),
     async run(input, ctx) {
       const now = begin(ctx);
-      const item = store.ask(ctx.db, { type: ctx.caller.type, id: ctx.caller.id, name: ctx.caller.name }, input, now);
+      const item = store.ask(ctx.db, actorOf(ctx), input, now);
       ctx.statusChanged();
       try {
         await alertNewItem(ctx.db, ctx.callApp, item, now);
@@ -114,6 +128,23 @@ export const handlers = {
     async run(input, ctx) {
       const now = begin(ctx);
       return store.reply(ctx.db, ctx.caller.id, input.itemId, input.message, now);
+    },
+  }),
+  [OP.inboxWithdraw]: op<InboxWithdrawInput, InboxWithdrawOutput>({
+    redact: (input) => clip(`withdraw ${input.itemId}`, 280),
+    async run(input, ctx) {
+      const now = begin(ctx);
+      const actor = actorOf(ctx);
+      // fail closed: only an agent, or an app whose product the SDK verified, can be the raiser of an item
+      if (actor.type === "person") throw new TbError("agent_only", "Only the agent or app that raised an item can withdraw it.", 403);
+      if (actor.type === "app" && actor.product === null) {
+        store.recordRefusal(ctx.db, actor, input.itemId, "no_product", now);
+        throw new TbError("caller_unverified", "The calling app has no verified product, so it cannot withdraw an item.", 403);
+      }
+      const out = store.withdraw(ctx.db, actor, input.itemId, input.reason, now);
+      if (out.result === "withdrawn") ctx.statusChanged();
+      ctx.receipt.meta({ result: out.result });
+      return out;
     },
   }),
   [OP.itemsList]: op<ItemsListInput, ItemsListOutput>({

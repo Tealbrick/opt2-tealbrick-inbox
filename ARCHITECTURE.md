@@ -22,8 +22,8 @@ Inbox lists holds from every app through the wildcard companion op `tb.holds_pen
 
 ## Operations (from `tealbrick.manifest.json`)
 
-12 operations. No destructive ops and no hold families declared.
-- Agent: `inbox_ask` and `inbox_reply` (write, idempotency required), `inbox_status` (read).
+13 operations. No destructive ops and no hold families declared.
+- Agent: `inbox_ask` and `inbox_reply` (write, idempotency required), `inbox_status` (read), `inbox_withdraw` (write, crud `update`, idempotency supported, receipt: the raiser closes its own open item; `src/store.ts` `withdraw`). Identity is the verified caller only: agent id, or app instance id AND verified product (`ctx.caller.product`); a non-raiser gets `unknown` exactly as for a missing id; an app without a product gets `caller_unverified` (403).
 - Person read: `items_list`, `item_get`, `holds_overview`, `alerts_get`. Person write: `item_decide`, `item_snooze`, `item_priority`, `item_ack`, `alerts_set`.
 - Fail-closed answers: `already_decided`, `stale_version`, `item_expired`, `response_not_allowed`, `message_required`, `item_closed`, `too_many_open_items` (429).
 
@@ -39,13 +39,20 @@ None. No keys and no environment variables.
 
 ## Data
 
-- **Stored:** Migration 0001: `inbox_items` (kind approval or question, title, context, allowed responses, status, priority, version, snooze, expiry), `inbox_messages`, `inbox_decisions`, `inbox_deliveries` (alert DM outbox with idempotency key, attempts), `inbox_settings`. Defaults: item expiry 7 days, max snooze 30 days, max 100 open items per caller. The alert DM carries the title only, never the context.
+- **Stored:** Migration 0001: `inbox_items` (kind approval or question, title, context, allowed responses, status, priority, version, snooze, expiry), `inbox_messages`, `inbox_decisions`, `inbox_deliveries` (alert DM outbox with idempotency key, attempts), `inbox_settings`. Migration 0002: `inbox_items.from_product` (the verified product of the raising app; NULL for agents and for every row before 0002), `withdrawn_at`, `withdrawn_reason`, and `inbox_activity` (owner-visible item history and the withdraw audit: withdraws and throttled refused attempts, with the verified actor type, instance and product; refused rows are pruned after 90 days by the tick). Defaults: item expiry 7 days, max snooze 30 days, max 100 open items per caller. The alert DM carries the title only, never the context.
 - **Never stored:** Other apps' hold details (read live, not persisted), credentials.
 
 ## External calls and background work
 
 - **External:** None directly. Everything goes through the Connect companion call.
 - **Background:** A 60 s tick: expiry sweep (calls `statusChanged` for the badge) and retry of pending or held alert sends (up to 60 attempts, 1 minute apart). Lazy expiry on every op as well.
+
+## Rollback and reinstall (inbox_withdraw)
+
+- Do not roll back to 0.2.9 once migration 0002 has run: 0002 has no down migration and 0.2.9 does not know its columns and table. Restore the pre-update snapshot (SDK upgrade safety) instead.
+- A reinstalled app gets a new instance id. An app that raised items before its reinstall cannot withdraw them afterwards (the raiser match is on the recorded instance id and product); those items stay open until the owner answers them or they expire. Agents are matched on their agent id and keep their rights.
+- The item history in `item_get` shows every withdraw row and the refused attempts folded per caller and cause (a count, the newest time), at most 50 lines. A refused attempt on an id that does not exist is counted against a separate hourly cap from attempts on a real item, so junk ids cannot hide a probe.
+- A send that is in flight while an item is withdrawn cannot be recalled; its result never overwrites the withdrawn delivery, and no new send is attempted for a withdrawn item.
 
 ## Person UI
 
@@ -59,9 +66,9 @@ Port 8080. 0.25 cpu, 256 MB. Data 1 GB plus backup 2 GB. Backup cron `30 2 * * *
 
 ## Pinned packages
 
-miniapp-sdk 0.1.25, manifest 0.1.18, conformance 0.1.18, ui 0.2.4.
+miniapp-sdk 0.1.28 (spec 0.1.46), manifest 0.1.23, conformance 0.1.21, ui 0.2.4.
 
-All `@opt2-tealbrick/*` pins use dist-host tarball URLs. Upgrade safety (SDK 0.1.25: pre-update snapshot, migration lock, failed mode) is in this app on `main` (0.2.9, dev channel). The stable release 0.2.8 pins SDK 0.1.22, so Core can roll back an update of that version only as an image (no data restore) until a stable version with SDK 0.1.25 ships (after the qa1 soak).
+All `@opt2-tealbrick/*` pins use dist-host tarball URLs. Upgrade safety (SDK 0.1.25 and later: pre-update snapshot, migration lock, failed mode) is in this app on `main`. The stable release 0.2.8 pins SDK 0.1.22, so Core can roll back an update of that version only as an image (no data restore) until a stable version with SDK 0.1.25 ships (after the qa1 soak).
 
 ## Known gaps
 
