@@ -120,14 +120,14 @@ export const handlers = {
     async run(input, ctx) {
       const now = begin(ctx);
       await retryAlerts(ctx, now);
-      return store.status(ctx.db, ctx.caller.id, input.itemId);
+      return store.status(ctx.db, actorOf(ctx), input.itemId);
     },
   }),
   [OP.inboxReply]: op<InboxReplyInput, InboxReplyOutput>({
     redact: (input) => clip(`reply to ${input.itemId}`, 280),
     async run(input, ctx) {
       const now = begin(ctx);
-      return store.reply(ctx.db, ctx.caller.id, input.itemId, input.message, now);
+      return store.reply(ctx.db, actorOf(ctx), input.itemId, input.message, now);
     },
   }),
   [OP.inboxWithdraw]: op<InboxWithdrawInput, InboxWithdrawOutput>({
