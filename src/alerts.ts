@@ -85,7 +85,12 @@ export async function alertNewItem(db: Db, callApp: Send, item: ItemSummary, now
 
 /** Repeats due pending/held sends (called lazily from ops; at most `max` per call). */
 export async function retryDue(db: Db, callApp: Send, now: number, max = 3): Promise<void> {
-  const due = db.prepare("SELECT id FROM inbox_deliveries WHERE status IN ('pending', 'held') AND next_at <= ? ORDER BY next_at ASC LIMIT ?").all(now, max);
+  // (a withdrawn item's deliveries are stopped by the withdraw; the filter keeps any straggler from starving the others)
+  const due = db
+    .prepare(
+      "SELECT d.id FROM inbox_deliveries d WHERE d.status IN ('pending', 'held') AND d.next_at <= ? AND d.item_id NOT IN (SELECT id FROM inbox_items WHERE withdrawn_at IS NOT NULL) ORDER BY d.next_at ASC LIMIT ?",
+    )
+    .all(now, max);
   for (const d of due) await attempt(db, callApp, String(d.id), now);
 }
 
@@ -95,12 +100,19 @@ function errorCode(e: unknown): string {
 }
 
 async function attempt(db: Db, callApp: Send, id: string, now: number): Promise<void> {
-  const d = db.prepare("SELECT op, input, idem_key, attempts, hold_id FROM inbox_deliveries WHERE id = ? AND status IN ('pending', 'held')").get(id);
+  // no send for a withdrawn item (inbox_withdraw closes its deliveries; this is the read-side guard)
+  const d = db
+    .prepare(
+      "SELECT d.op, d.input, d.idem_key, d.attempts, d.hold_id FROM inbox_deliveries d JOIN inbox_items i ON i.id = d.item_id WHERE d.id = ? AND d.status IN ('pending', 'held') AND i.withdrawn_at IS NULL",
+    )
+    .get(id);
   if (!d) return;
   const attempts = Number(d.attempts) + 1;
+  // The send is awaited, so a withdraw can close this delivery meanwhile (status failed, error withdrawn). Every write here
+  // is guarded on the delivery still being pending or held: the result of a send never overwrites a closed delivery.
   const set = (status: string, holdId: string | null, error: string | null) =>
     db
-      .prepare("UPDATE inbox_deliveries SET status = ?, hold_id = COALESCE(?, hold_id), error = ?, attempts = ?, next_at = ?, updated_at = ? WHERE id = ?")
+      .prepare("UPDATE inbox_deliveries SET status = ?, hold_id = COALESCE(?, hold_id), error = ?, attempts = ?, next_at = ?, updated_at = ? WHERE id = ? AND status IN ('pending', 'held')")
       .run(status, holdId, error, attempts, now + RETRY_AFTER_MS, now, id);
   if (attempts > MAX_ATTEMPTS) {
     set("failed", null, "gave_up");
@@ -125,7 +137,7 @@ async function attempt(db: Db, callApp: Send, id: string, now: number): Promise<
     if (first && String(d.op) !== first) {
       // Connect: the owner's address was never written to from the workspace sender. Switch to the first-contact op
       // (Connect holds it for the owner's approval), same input and key, and try it at once.
-      db.prepare("UPDATE inbox_deliveries SET op = ?, updated_at = ? WHERE id = ?").run(first, now, id);
+      db.prepare("UPDATE inbox_deliveries SET op = ?, updated_at = ? WHERE id = ? AND status IN ('pending', 'held')").run(first, now, id);
       clearTimeout(timer);
       return attempt(db, callApp, id, now);
     }
