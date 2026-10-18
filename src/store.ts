@@ -186,7 +186,7 @@ export function ask(db: Db, from: From & { product?: string | null }, input: Ask
     from.type,
     from.id,
     from.name,
-    from.type === "app" ? (from.product ?? null) : null,
+    from.type === "app" && from.product ? from.product : null,
     input.priority ?? "normal",
     now,
     now,
@@ -195,10 +195,30 @@ export function ask(db: Db, from: From & { product?: string | null }, input: Ask
   return toSummary(row(db, id) as Row, now);
 }
 
+/** The caller of an agent op as the SDK verified it: type, id, and an app's verified product (null when not known). */
+export type Caller = Pick<Actor, "type" | "id" | "product">;
+
+/**
+ * An item belongs to the caller that raised it: the same type and the same id (agent id or app instance id); for an app
+ * also the same verified product when the item recorded one. A recorded product never matches a caller without that
+ * verified product (fail closed). Items without a recorded product (raised before migration 0002, or through a bridge
+ * that did not sign the product yet, C243) match on type and instance id, as before; the instance id comes from the
+ * verified grant too, so only an instance id collision could cross products there. A caller that arrives WITHOUT a
+ * product (e.g. through an older bridge) reads `unknown` on an item that recorded one: it should retry or ask again, never
+ * treat `unknown` as a refusal. inbox_withdraw is stricter (raisedBy): it needs a recorded product for an app.
+ * Refused status/reply calls leave no history row (read path, no write); only inbox_withdraw records refused attempts.
+ */
+function ownedBy(r: Row, c: Caller): boolean {
+  if (c.type === "person" || r.from_type !== c.type || r.from_id !== c.id) return false;
+  if (c.type === "agent") return true;
+  const recorded = r.from_product === null || r.from_product === undefined || r.from_product === "" ? null : String(r.from_product);
+  return recorded === null || recorded === c.product;
+}
+
 /** An item as its creator sees it; another caller's item is "not found" (no existence leak). */
-function ownRow(db: Db, callerId: string, itemId: string): Row {
+function ownRow(db: Db, caller: Caller, itemId: string): Row {
   const r = row(db, itemId);
-  if (!r || r.from_id !== callerId) notFound();
+  if (!r || !ownedBy(r, caller)) notFound();
   return r;
 }
 
@@ -214,9 +234,9 @@ export interface AgentStatus {
 }
 
 /** An unknown id, or another caller's item, reads as `unknown` (no existence leak; never an approval). */
-export function status(db: Db, callerId: string, itemId: string): AgentStatus {
+export function status(db: Db, caller: Caller, itemId: string): AgentStatus {
   const r = row(db, itemId);
-  if (!r || r.from_id !== callerId)
+  if (!r || !ownedBy(r, caller))
     return { itemId, kind: null, status: "unknown", seenByOwner: false, response: null, message: null, decidedAt: null, expiresAt: null };
   const d = db.prepare("SELECT response, message, decided_at FROM inbox_decisions WHERE item_id = ?").get(itemId);
   return {
@@ -231,15 +251,15 @@ export function status(db: Db, callerId: string, itemId: string): AgentStatus {
   };
 }
 
-export function reply(db: Db, callerId: string, itemId: string, body: string, now: number): { itemId: string; messageId: string } {
+export function reply(db: Db, caller: Caller, itemId: string, body: string, now: number): { itemId: string; messageId: string } {
   return db.transaction(() => {
-    const r = ownRow(db, callerId, itemId);
+    const r = ownRow(db, caller, itemId);
     if (r.status !== "open") throw new TbError("item_closed", `The item is ${r.status}; ask a new question instead.`, 409);
     // the version bump makes an answer the owner gave on the older text stale
     const changed = db.prepare("UPDATE inbox_items SET version = version + 1, updated_at = ? WHERE id = ? AND status = 'open'").run(now, itemId).changes;
     if (changed !== 1) throw new TbError("item_closed", "The item is no longer open.", 409);
     const messageId = `msg_${ulid(now)}`;
-    db.prepare("INSERT INTO inbox_messages (id, item_id, author, author_id, body, created_at) VALUES (?, ?, 'agent', ?, ?, ?)").run(messageId, itemId, callerId, body, now);
+    db.prepare("INSERT INTO inbox_messages (id, item_id, author, author_id, body, created_at) VALUES (?, ?, 'agent', ?, ?, ?)").run(messageId, itemId, caller.id, body, now);
     return { itemId, messageId };
   });
 }
@@ -265,7 +285,13 @@ export const REFUSAL_PER_ACTOR_HOUR = 20;
 export const REFUSAL_LINES_SHOWN = 50;
 export const REFUSAL_SAME_ITEM_MS = 10 * 60_000;
 /** Refused-attempt rows older than this are removed by the background tick. */
-export const REFUSAL_KEEP_MS = 90 * 24 * 3600 * 1000;
+export const REFUSAL_KEEP_MS = 30 * 24 * 3600 * 1000;
+/**
+ * The tick also keeps at most this many refused-attempt rows per class (newest stay), whatever the number of actors.
+ * Junk ids have their own, smaller cap, so a flood of made-up ids never pushes out the trace of a probe of a real item.
+ */
+export const REFUSAL_CAP = 5000;
+export const REFUSAL_CAP_UNKNOWN = 2000;
 const DETAIL_MAX = 500;
 
 export type RefusalCode = "unknown_item" | "not_raiser" | "no_product";
@@ -283,7 +309,10 @@ function raisedBy(r: Row, a: Actor): boolean {
 
 /** Writes the audit row of a refused attempt, throttled; the throttle only skips the row, it never changes the answer. */
 export function recordRefusal(db: Db, a: Actor, itemId: string, code: RefusalCode, now: number): void {
-  const junk = code === "unknown_item";
+  // a refused call on an id that does not exist is junk whatever the cause, so it never uses the budget (or the cap)
+  // that keeps the trace of a probe of a real item
+  const cause: RefusalCode = code !== "unknown_item" && !row(db, itemId) ? "unknown_item" : code;
+  const junk = cause === "unknown_item";
   const recent = Number(
     db
       .prepare(`SELECT COUNT(*) AS n FROM inbox_activity WHERE actor_id = ? AND kind = 'withdraw_refused' AND created_at > ? AND (detail = 'unknown_item') = ?`)
@@ -299,14 +328,31 @@ export function recordRefusal(db: Db, a: Actor, itemId: string, code: RefusalCod
     a.id,
     a.product,
     a.name,
-    code,
+    cause,
     now,
   );
 }
 
-/** Removes old refused-attempt rows (withdraw rows are the item's history and stay). */
+/**
+ * Removes refused-attempt rows older than REFUSAL_KEEP_MS, then all but the newest rows of each class over its cap.
+ * Withdraw rows are the item's history and always stay.
+ */
 export function pruneActivity(db: Db, now: number): number {
-  return Number(db.prepare("DELETE FROM inbox_activity WHERE kind = 'withdraw_refused' AND created_at < ?").run(now - REFUSAL_KEEP_MS).changes);
+  let n = Number(db.prepare("DELETE FROM inbox_activity WHERE kind = 'withdraw_refused' AND created_at < ?").run(now - REFUSAL_KEEP_MS).changes);
+  for (const [junk, cap] of [
+    [1, REFUSAL_CAP_UNKNOWN],
+    [0, REFUSAL_CAP],
+  ] as const)
+    n += Number(
+      db
+        .prepare(
+          `DELETE FROM inbox_activity WHERE id IN (
+             SELECT id FROM inbox_activity WHERE kind = 'withdraw_refused' AND (IFNULL(detail, '') = 'unknown_item') = ?
+             ORDER BY created_at DESC, id DESC LIMIT -1 OFFSET ?)`,
+        )
+        .run(junk, cap).changes,
+    );
+  return n;
 }
 
 /**
