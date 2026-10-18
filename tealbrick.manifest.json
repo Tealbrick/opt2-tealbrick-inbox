@@ -1793,6 +1793,222 @@
       "idempotency": "supported",
       "receipt": false,
       "audience": "person"
+    },
+    {
+      "id": "inbox_metrics",
+      "title": "Inbox activity",
+      "description": "Activity of the inbox over 7 or 30 days (owner only, read). FIXED definitions: window = (now - days, now] by created_at. asked = items created in it. answered, expired, withdrawn, open = those items by status now; expired excludes withdrawn. timeToDecision = answered items: n, p50S, p90S = nearest-rank percentiles of seconds from created_at to decided_at (null when n = 0). expiryRate = expired / (answered + expired), null when 0. reAskRate = re-asks / asked, null when asked = 0; a re-ask = same raiser (from_type + from_id) had an item with the same normalized title (trim, collapse spaces, lower case) that expired by time (not withdrawn) at most 24 h before. byRaiser = top 10 raisers by asked, then id.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [],
+        "properties": {
+          "days": {
+            "type": "integer",
+            "enum": [
+              7,
+              30
+            ],
+            "default": 7,
+            "description": "Window length in days (default 7). The window is (now - days, now] by created_at."
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "window",
+          "asked",
+          "answered",
+          "expired",
+          "withdrawn",
+          "open",
+          "timeToDecision",
+          "expiryRate",
+          "reAskRate",
+          "byRaiser"
+        ],
+        "properties": {
+          "window": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "from",
+              "to",
+              "days"
+            ],
+            "properties": {
+              "from": {
+                "type": "string",
+                "description": "Start of the window, exclusive (now - days), ISO time."
+              },
+              "to": {
+                "type": "string",
+                "description": "End of the window, inclusive (now), ISO time."
+              },
+              "days": {
+                "type": "integer",
+                "enum": [
+                  7,
+                  30
+                ]
+              }
+            }
+          },
+          "asked": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Items created in the window."
+          },
+          "answered": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Items of the window answered now."
+          },
+          "expired": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Items of the window expired by time now (withdrawn items are NOT counted here)."
+          },
+          "withdrawn": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Items of the window withdrawn by their raiser."
+          },
+          "open": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Items of the window still open."
+          },
+          "timeToDecision": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "n",
+              "p50S",
+              "p90S"
+            ],
+            "properties": {
+              "n": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Answered items of the window."
+              },
+              "p50S": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0,
+                "description": "Median seconds from created_at to decided_at (nearest rank); null when n = 0."
+              },
+              "p90S": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0,
+                "description": "90th percentile seconds from created_at to decided_at (nearest rank); null when n = 0."
+              }
+            }
+          },
+          "expiryRate": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 1,
+            "description": "expired / (answered + expired), rounded to 4 decimals; withdrawn and open are excluded; null when the denominator is 0."
+          },
+          "reAskRate": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Re-asks / asked, rounded to 4 decimals; a re-ask repeats the same normalized title of the same raiser within 24 h after it expired by time; null when asked = 0."
+          },
+          "byRaiser": {
+            "type": "array",
+            "maxItems": 10,
+            "description": "Top 10 raisers by asked (then by id), same counts.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "from",
+                "asked",
+                "answered",
+                "expired",
+                "withdrawn",
+                "open"
+              ],
+              "properties": {
+                "from": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type",
+                    "id",
+                    "name"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "enum": [
+                        "agent",
+                        "app",
+                        "person"
+                      ]
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "asked": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Items created in the window by this raiser."
+                },
+                "answered": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Of those, answered now."
+                },
+                "expired": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Of those, expired by time now (withdrawn items are NOT counted here)."
+                },
+                "withdrawn": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Of those, withdrawn by their raiser."
+                },
+                "open": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Of those, still open."
+                }
+              }
+            }
+          }
+        }
+      },
+      "crud": [
+        "read"
+      ],
+      "effect": "read",
+      "idempotency": "none",
+      "receipt": false,
+      "audience": "person"
     }
   ],
   "companions": [

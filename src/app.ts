@@ -6,7 +6,7 @@
 // different input → 409), inbox_status (poll the answer), inbox_reply (add to an open item), inbox_withdraw (the
 // raiser closes its own open item; an app is matched on the verified product and instance, never on a name).
 // Owner side (person session = the workspace owner only, SDK-API §5): list/get, decide, snooze, priority, ack,
-// holds overview and the alert setting.
+// holds overview, the alert setting and the activity metrics (inbox_metrics).
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { isValidLaunchPath } from "@opt2-tealbrick/manifest";
@@ -20,6 +20,8 @@ import {
   type HoldsOverviewOutput,
   type InboxAskInput,
   type InboxAskOutput,
+  type InboxMetricsInput,
+  type InboxMetricsOutput,
   type InboxReplyInput,
   type InboxReplyOutput,
   type InboxStatusInput,
@@ -43,6 +45,7 @@ import {
 } from "#kit";
 import { AlertsError, alertNewItem, readAlerts, retryDue, writeAlerts } from "./alerts.ts";
 import { overview } from "./holds.ts";
+import { metrics } from "./metrics.ts";
 import * as store from "./store.ts";
 
 export const manifest = JSON.parse(readFileSync(new URL("../tealbrick.manifest.json", import.meta.url), "utf8")) as AppDefinition["manifest"];
@@ -220,6 +223,13 @@ export const handlers = {
         { manifest, companionTargets: () => c.companionTargets(), callApp: (p, o, i) => c.callApp(p, o, i), ownerLink: (p) => c.ownerLink(p), now },
         store.openItems(ctx.db, now, 100),
       );
+    },
+  }),
+  [OP.inboxMetrics]: op<InboxMetricsInput, InboxMetricsOutput>({
+    async run(input, ctx) {
+      owner(ctx);
+      const now = begin(ctx);
+      return metrics(ctx.db, input.days ?? 7, now);
     },
   }),
   [OP.alertsGet]: op<AlertsGetInput, AlertsGetOutput>({
