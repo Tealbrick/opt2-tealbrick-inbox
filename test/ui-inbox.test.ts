@@ -54,6 +54,7 @@ const item = (over: Record<string, unknown> = {}) => ({
   deliveries: [],
   withdrawal: null,
   activity: [],
+  open: null,
   ...over,
 });
 const overview = {
@@ -235,6 +236,29 @@ describe("Inbox item", () => {
     assert.match(m.host.querySelector(".msgs")?.textContent ?? "", /New fact\./);
     await click(button(m.host, "I have read it"));
     assert.equal(m.host.querySelector(".tb-notice.needs-you button"), null, "the unread notice is gone once read");
+    await m.unmount();
+  });
+});
+
+describe("Open in <app> (R5, inbox_ask open)", () => {
+  it("an item with open shows one Open in <app> link to the Portal URL (new tab, no opener); the label is text", async () => {
+    const url = "https://portal.example.test/w/wsp_1/open?product=observer&path=%2Freview%2Frec_1";
+    reset({ items_list: { items: [], nextCursor: null, counts: { pending: 0, snoozed: 0 } }, item_get: item({ from: { type: "app", id: "ins_9", name: "Observer" }, open: { url, app: "<b>Observer</b>" } }) });
+    const m = await mount(inbox());
+    const links = [...m.host.querySelectorAll(".detail a")].filter((x) => x.textContent?.startsWith("Open in "));
+    assert.equal(links.length, 1);
+    assert.equal(links[0]?.textContent, "Open in <b>Observer</b>");
+    assert.equal(links[0]?.getAttribute("href"), url);
+    assert.equal(links[0]?.getAttribute("target"), "_blank");
+    assert.match(links[0]?.getAttribute("rel") ?? "", /noopener/);
+    assert.equal(m.host.querySelector(".detail a b"), null, "the label is never parsed as markup");
+    await m.unmount();
+  });
+
+  it("an item without open shows no Open in link", async () => {
+    reset({ items_list: { items: [], nextCursor: null, counts: { pending: 0, snoozed: 0 } }, item_get: item() });
+    const m = await mount(inbox());
+    assert.ok(![...m.host.querySelectorAll(".detail a")].some((x) => x.textContent?.startsWith("Open in ")));
     await m.unmount();
   });
 });

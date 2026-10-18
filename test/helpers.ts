@@ -2,6 +2,7 @@
 // SDK's do), and a minimal OpContext for calling handlers directly.
 import { readdirSync, readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
+import { isValidLaunchPath } from "@opt2-tealbrick/manifest";
 import type { Db, Json, OpContext } from "@opt2-tealbrick/miniapp-sdk";
 
 const MIGRATIONS = new URL("../migrations/", import.meta.url);
@@ -79,6 +80,12 @@ export function ctxFor(db: Db, caller: { type: string; id: string; name: string;
     },
     // the SDK's rule: <portalUrl>/w/<ws>/open?product=<own>&path=<path>
     ownerLink: (path: string) => (x.portal === false ? null : `${PORTAL}/w/${WS}/open?product=inbox&path=${encodeURIComponent(path)}`),
+    // the SDK rule for another app (miniapp-sdk 0.1.20): product id and launch path checked, null until portalUrl
+    ownerLinkFor: (product: string, path: string) => {
+      if (!/^[a-z][a-z0-9-]{1,31}$/.test(product)) throw Object.assign(new Error("not a product id"), { code: "product_invalid" });
+      if (!isValidLaunchPath(path)) throw Object.assign(new Error("bad path"), { code: "path_invalid" });
+      return x.portal === false ? null : `${PORTAL}/w/${WS}/open?product=${encodeURIComponent(product)}&path=${encodeURIComponent(path)}`;
+    },
     companionTargets: () => x.targets ?? [],
   } as unknown as OpContext;
 }

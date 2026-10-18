@@ -122,6 +122,22 @@
             "minimum": 60,
             "maximum": 2592000,
             "description": "Seconds until the item expires unanswered (default 7 days)."
+          },
+          "open": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "path"
+            ],
+            "properties": {
+              "path": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200,
+                "description": "A page of the CALLING app (e.g. /review/<id>), checked with the shared launch-path rule. The owner sees \"Open in <app>\" on the item."
+              }
+            },
+            "description": "Only for an app caller with a verified product: a page of that app the owner can open from the item. An agent caller, an app without a verified product, or a path the launch rule refuses is refused (the whole call)."
           }
         }
       },
@@ -601,7 +617,8 @@
           "decision",
           "deliveries",
           "withdrawal",
-          "activity"
+          "activity",
+          "open"
         ],
         "properties": {
           "id": {
@@ -931,6 +948,28 @@
                 }
               }
             }
+          },
+          "open": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": false,
+            "required": [
+              "url",
+              "app"
+            ],
+            "properties": {
+              "url": {
+                "type": "string",
+                "description": "Portal link that opens the raising app at the page it named."
+              },
+              "app": {
+                "type": "string",
+                "description": "The raising app's name (from its signed release, via the Portal slice)."
+              }
+            },
+            "description": "The raising app's page for this item (inbox_ask open), or null when none was given or the Portal link is not known yet."
           }
         }
       },

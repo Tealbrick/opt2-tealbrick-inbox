@@ -107,7 +107,12 @@ export interface ItemDetail extends ItemSummary {
   deliveries: DeliveryView[];
   withdrawal: Withdrawal | null;
   activity: ActivityView[];
+  /** R5: the raising app's page for this item (inbox_ask open), or null */
+  open: { url: string; app: string } | null;
 }
+
+/** Builds the Portal link to `path` in `product` (ctx.ownerLinkFor); null when unknown. May throw on a bad product or path. */
+export type LinkFor = (product: string, path: string) => string | null;
 
 type Row = Record<string, unknown>;
 const iso = (ms: unknown): string => new Date(Number(ms)).toISOString();
@@ -158,6 +163,8 @@ export interface AskInput {
   responses?: Response[];
   priority?: Priority;
   expiresInS?: number;
+  /** R5: a page of the calling app; the handler accepts it only from an app with a verified product and a valid launch path */
+  open?: { path: string };
 }
 
 /** `from.product` (an app's VERIFIED product) is recorded with the item: inbox_withdraw matches on it. */
@@ -175,8 +182,8 @@ export function ask(db: Db, from: From & { product?: string | null }, input: Ask
   const id = `itm_${ulid(now)}`;
   const expiresAt = now + (input.expiresInS ?? DEFAULT_EXPIRY_S) * 1000;
   db.prepare(
-    `INSERT INTO inbox_items (id, kind, title, context, responses, from_type, from_id, from_name, from_product, status, priority, version, acked_at, snoozed_until, created_at, updated_at, expires_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, 1, NULL, NULL, ?, ?, ?)`,
+    `INSERT INTO inbox_items (id, kind, title, context, responses, from_type, from_id, from_name, from_product, open_path, status, priority, version, acked_at, snoozed_until, created_at, updated_at, expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, 1, NULL, NULL, ?, ?, ?)`,
   ).run(
     id,
     input.kind,
@@ -187,6 +194,8 @@ export function ask(db: Db, from: From & { product?: string | null }, input: Ask
     from.id,
     from.name,
     from.type === "app" && from.product ? from.product : null,
+    // a page of the raising app only: never stored without the verified product it will be linked to
+    from.type === "app" && from.product && input.open ? input.open.path : null,
     input.priority ?? "normal",
     now,
     now,
@@ -465,7 +474,27 @@ function activityOf(db: Db, itemId: string): ActivityView[] {
   return [...withdrawn, ...refused].sort((p, q) => p.at - q.at || (p.id < q.id ? -1 : p.id > q.id ? 1 : 0)).map((x) => ({ ...x, at: iso(x.at) }));
 }
 
-export function get(db: Db, itemId: string, now: number): ItemDetail {
+/**
+ * R5: the raising app's page, linked through its RECORDED verified product (never a product from any input). The label
+ * is the app's name as the Portal-signed slice gave it at ask time (Core takes it from the app's signed release); the SDK
+ * falls back to the instance id when the slice had no name, and then the product id is shown instead.
+ */
+function openOf(r: Row, linkFor: LinkFor | undefined): ItemDetail["open"] {
+  const product = str(r.from_product);
+  const path = str(r.open_path);
+  if (!linkFor || r.from_type !== "app" || !product || !path) return null;
+  let url: string | null;
+  try {
+    url = linkFor(product, path);
+  } catch {
+    return null; // product_invalid / path_invalid: never link what the launch rule refuses
+  }
+  if (!url) return null;
+  const name = String(r.from_name);
+  return { url, app: name && name !== String(r.from_id) ? name : product };
+}
+
+export function get(db: Db, itemId: string, now: number, linkFor?: LinkFor): ItemDetail {
   const r = row(db, itemId);
   if (!r) notFound();
   const messages = db
@@ -495,6 +524,7 @@ export function get(db: Db, itemId: string, now: number): ItemDetail {
     deliveries,
     withdrawal: r.withdrawn_at !== null && r.withdrawn_at !== undefined ? { at: iso(r.withdrawn_at), reason: str(r.withdrawn_reason) } : null,
     activity,
+    open: openOf(r, linkFor),
   };
 }
 

@@ -219,6 +219,18 @@ describe("inbox_withdraw through the real SDK", () => {
     );
   });
 
+  it("R5 through the real SDK: open {path} passes the manifest schema for a verified app; an agent, a bad path and an unknown open field are refused; no Portal URL means no link", async () => {
+    const r = await call("inbox_ask", { kind: "question", title: "3 records wait", open: { path: "/review/rec_01J00000000000000000000001" } }, asApp(CREATIVE_1, "creative"), key());
+    const itemId = ok(r).itemId;
+    assert.equal((await person("item_get", { itemId })).open, null, "the fake bridge slice has no portalUrl: no half-built link");
+    const agent = await call("inbox_ask", { kind: "question", title: "x", open: { path: "/review" } }, asAgent(agentA), key());
+    assert.deepEqual([agent.status, (agent.body as { code?: string; error?: { code?: string } }).error?.code ?? (agent.body as { code?: string }).code], [400, "open_not_allowed"]);
+    const bad = await call("inbox_ask", { kind: "question", title: "x", open: { path: "//evil.example/x" } }, asApp(CREATIVE_1, "creative"), key());
+    assert.equal(bad.status, 400);
+    const extra = await call("inbox_ask", { kind: "question", title: "x", open: { path: "/review", product: "kanban" } }, asApp(CREATIVE_1, "creative"), key());
+    assert.equal(extra.status, 400, "the product is never an input");
+  });
+
   it("the SDK checks the input: a missing itemId or an unknown field is refused before the handler", async () => {
     const who = asApp(CREATIVE_1, "creative");
     assert.equal((await call("inbox_withdraw", {}, who, key())).status, 400);

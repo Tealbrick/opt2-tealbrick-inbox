@@ -3,7 +3,7 @@
 // started with a bare `void` that has no catch.
 import type { Json } from "@opt2-tealbrick/miniapp-sdk";
 import { callOp, TbError } from "@opt2-tealbrick/miniapp-sdk/client";
-import { Button, EmptyState, Field, Notice, Select, type Status, Tabs, Tag, Textarea } from "@opt2-tealbrick/ui";
+import { Button, ButtonLink, EmptyState, Field, Notice, Select, type Status, Tabs, Tag, Textarea } from "@opt2-tealbrick/ui";
 import { type MouseEvent, useEffect, useRef, useState } from "react";
 import type { ItemGetOutput, ItemsListOutput } from "#kit";
 import { ago, day, errText, Head, LoadError, Loading, useOp, when, whenShort } from "./shared.tsx";
@@ -140,6 +140,14 @@ function Detail({ id, onChanged }: { id: string; onChanged: () => void }) {
         {open ? <span className="tb-hint">Expires {day(item.expiresAt)}</span> : null}
       </div>
       {item.context ? <p className="tb-soft pre">{item.context}</p> : <p className="tb-hint">The agent gave no further context.</p>}
+      {item.open ? (
+        // R5: Portal opens the raising app at the page it named (launch ticket); the link names its verified product
+        <p className="tb-row">
+          <ButtonLink size="sm" href={item.open.url} target="_blank" rel="noopener noreferrer">
+            Open in {item.open.app}
+          </ButtonLink>
+        </p>
+      ) : null}
       {item.messages.length > 0 ? (
         <ol className="msgs" aria-label="Messages">
           {item.messages.map((m) => (
