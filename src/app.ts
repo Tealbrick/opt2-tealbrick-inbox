@@ -41,7 +41,7 @@ import {
   OP,
   type OpId,
 } from "#kit";
-import { AlertsError, alertNewItem, readAlerts, retryDue, writeAlerts } from "./alerts.ts";
+import { AlertsError, alertNewItem, digestOf, digestTick, readAlerts, retryDue, writeAlerts } from "./alerts.ts";
 import { overview } from "./holds.ts";
 import * as store from "./store.ts";
 
@@ -63,9 +63,9 @@ function begin(ctx: OpContext): number {
   return now;
 }
 
-/** Background tick (C85 app-initiated calls): expiry sweep (badge), due alert sends. */
+/** Background tick (C85 app-initiated calls): expiry sweep (badge), due alert sends, the alert digest (C263). */
 export const TICK_MS = 60_000;
-export async function tick(ctx: Pick<StartContext, "db" | "log" | "callApp" | "statusChanged">, now = clock.now()): Promise<void> {
+export async function tick(ctx: Pick<StartContext, "db" | "log" | "callApp" | "statusChanged"> & Partial<Pick<StartContext, "ownerLink">>, now = clock.now()): Promise<void> {
   try {
     if (store.expireDue(ctx.db, now) > 0) ctx.statusChanged();
     try {
@@ -75,6 +75,7 @@ export async function tick(ctx: Pick<StartContext, "db" | "log" | "callApp" | "s
       ctx.log.warn("inbox activity prune failed", { error: e instanceof Error ? e.message : "unknown" });
     }
     await retryDue(ctx.db, ctx.callApp, now);
+    await digestTick(ctx.db, ctx.callApp, (p) => ctx.ownerLink?.(p) ?? null, now);
   } catch (e) {
     ctx.log.warn("inbox tick failed", { error: e instanceof Error ? e.message : "unknown" });
   }
@@ -172,7 +173,8 @@ export const handlers = {
     async run(input, ctx) {
       owner(ctx);
       const c = ctx as SdkOpContext;
-      return store.get(ctx.db, input.itemId, begin(ctx), (product, path) => {
+      const now = begin(ctx);
+      const item = store.get(ctx.db, input.itemId, now, (product, path) => {
         try {
           return c.ownerLinkFor(product, path);
         } catch (e) {
@@ -181,6 +183,7 @@ export const handlers = {
           return null;
         }
       });
+      return { ...item, digest: digestOf(ctx.db, item, now) };
     },
   }),
   [OP.itemDecide]: op<ItemDecideInput, ItemDecideOutput>({
@@ -232,9 +235,9 @@ export const handlers = {
     async run(input, ctx) {
       owner(ctx);
       try {
-        return writeAlerts(ctx.db, input);
+        return writeAlerts(ctx.db, input, clock.now());
       } catch (e) {
-        if (e instanceof AlertsError) throw new TbError("alerts_invalid", e.message, 400);
+        if (e instanceof AlertsError) throw new TbError(e.code, e.message, 400);
         throw e;
       }
     },

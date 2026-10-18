@@ -3,25 +3,40 @@
 // Connect may hold it for the owner's approval. A held send is repeated later with the SAME input and idempotency
 // key (SDK-API §4.3), which runs it once after approval. A refusal is recorded and never retried.
 // An alert never fails or delays the agent's ask beyond SEND_TIMEOUT_MS.
+// G6 I2 (C263): `delivery: digest` sends one DM per window (count + titles + Inbox link, never the context) instead of
+// one per item, and quiet hours in the owner's time zone hold every alert until the window ends.
 import { ulid } from "@opt2-tealbrick/manifest";
 import type { Db, Json, OpContext } from "@opt2-tealbrick/miniapp-sdk";
+import { inQuiet, type QuietHours, quietEnd, validHhmm, validTimeZone } from "./quiet.ts";
 import { type ItemSummary, readSetting, writeSetting } from "./store.ts";
+
+export const DIGEST_EVERY_MIN = [60, 180, 720, 1440] as const;
+export type DigestEveryMin = (typeof DIGEST_EVERY_MIN)[number];
 
 export interface Alerts {
   dm: "off" | "buzz" | "channel";
   buzzTo: string | null;
   channelAccount: string | null;
   channelPerson: string | null;
+  delivery: "each" | "digest";
+  digestEveryMin: DigestEveryMin;
+  quietHours: QuietHours | null;
+  timeZone: string | null;
 }
+/** What alerts_set takes: the I2 fields are optional (an older caller keeps their defaults). */
+export type AlertsInput = Pick<Alerts, "dm" | "buzzTo" | "channelAccount" | "channelPerson"> & Partial<Pick<Alerts, "delivery" | "digestEveryMin" | "quietHours" | "timeZone">>;
 
-export const ALERTS_OFF: Alerts = { dm: "off", buzzTo: null, channelAccount: null, channelPerson: null };
+export const ALERTS_OFF: Alerts = { dm: "off", buzzTo: null, channelAccount: null, channelPerson: null, delivery: "each", digestEveryMin: 60, quietHours: null, timeZone: null };
 const KEY = "alerts";
+/** The end of the last digest window (ms); set when digest delivery is turned on, moved by every digest build. */
+const DIGEST_CURSOR = "alerts_digest_cursor";
 export const CONNECT = "connect";
 export const SEND_TIMEOUT_MS = 5000;
 /** Retry schedule for pending/held sends (a hold lives 15 min by default; give up after about an hour). */
 const RETRY_AFTER_MS = 60_000;
 export const MAX_ATTEMPTS = 60;
-
+/** A digest names at most this many titles; the rest is "+N more". */
+export const DIGEST_TITLES = 10;
 /** Connect's refusal for a send to someone never written to → the op that asks the owner for first contact (C57). */
 export const FIRST_CONTACT: Record<string, string> = {
   buzz_first_contact_required: "buzz_dm_first",
@@ -30,36 +45,86 @@ export const FIRST_CONTACT: Record<string, string> = {
 
 const NPUB = /^(npub1[02-9ac-hj-np-z]{58}|[0-9a-f]{64})$/;
 
+/** The stored setting with the I2 defaults filled in; a stored value this build cannot use reads as its default (L24). */
 export function readAlerts(db: Db): Alerts {
-  return readSetting(db, KEY, ALERTS_OFF);
+  const s = readSetting<Partial<Alerts>>(db, KEY, ALERTS_OFF);
+  const q = s.quietHours;
+  const quietHours = q && validHhmm(q.start) && validHhmm(q.end) && q.start !== q.end ? { start: q.start, end: q.end } : null;
+  const timeZone = validTimeZone(s.timeZone) ? s.timeZone : null;
+  return {
+    dm: s.dm === "buzz" || s.dm === "channel" ? s.dm : "off",
+    buzzTo: s.buzzTo ?? null,
+    channelAccount: s.channelAccount ?? null,
+    channelPerson: s.channelPerson ?? null,
+    delivery: s.delivery === "digest" ? "digest" : "each",
+    digestEveryMin: DIGEST_EVERY_MIN.includes(s.digestEveryMin as DigestEveryMin) ? (s.digestEveryMin as DigestEveryMin) : 60,
+    // quiet hours without a usable zone are no quiet hours (the writer never stores that)
+    quietHours: quietHours && timeZone ? quietHours : null,
+    timeZone,
+  };
 }
 
 /** Validates and stores the setting. Fields of the other channel are cleared, so nothing stale lingers. */
-export function writeAlerts(db: Db, input: Alerts): Alerts {
+export function writeAlerts(db: Db, input: AlertsInput, now = Date.now()): Alerts {
   const blank = (v: string | null | undefined) => (v?.trim() ? v.trim() : null);
   let next: Alerts;
   if (input.dm === "off") next = ALERTS_OFF;
-  else if (input.dm === "buzz") {
-    const to = blank(input.buzzTo);
-    if (!to || !NPUB.test(to)) throw new AlertsError("buzzTo must be your Buzz key (npub1… or 64 hex characters).");
-    next = { dm: "buzz", buzzTo: to, channelAccount: null, channelPerson: null };
-  } else {
-    const account = blank(input.channelAccount);
-    const person = blank(input.channelPerson);
-    if (!account || !person) throw new AlertsError("A channel DM needs the Connect channel account and your handle in it.");
-    next = { dm: "channel", buzzTo: null, channelAccount: account, channelPerson: person };
+  else {
+    const delivery = input.delivery ?? "each";
+    if (delivery !== "each" && delivery !== "digest") throw new AlertsError("delivery must be each or digest.");
+    const digestEveryMin = input.digestEveryMin ?? 60;
+    if (!DIGEST_EVERY_MIN.includes(digestEveryMin)) throw new AlertsError(`digestEveryMin must be one of ${DIGEST_EVERY_MIN.join(", ")}.`);
+    const q = input.quietHours ?? null;
+    if (q && (!validHhmm(q.start) || !validHhmm(q.end))) throw new AlertsError("Quiet hours need a start and an end as HH:MM (24 h).");
+    if (q && q.start === q.end) throw new AlertsError("Quiet hours need different start and end times.");
+    const tz = blank(input.timeZone);
+    if (tz !== null && !validTimeZone(tz)) throw new AlertsError("timeZone must be a time zone name such as Europe/Berlin.", "time_zone_invalid");
+    if (q && tz === null) throw new AlertsError("Quiet hours need your time zone.", "time_zone_invalid");
+    const common = { delivery, digestEveryMin, quietHours: q ? { start: q.start, end: q.end } : null, timeZone: tz } as const;
+    if (input.dm === "buzz") {
+      const to = blank(input.buzzTo);
+      if (!to || !NPUB.test(to)) throw new AlertsError("buzzTo must be your Buzz key (npub1… or 64 hex characters).");
+      next = { dm: "buzz", buzzTo: to, channelAccount: null, channelPerson: null, ...common };
+    } else {
+      const account = blank(input.channelAccount);
+      const person = blank(input.channelPerson);
+      if (!account || !person) throw new AlertsError("A channel DM needs the Connect channel account and your handle in it.");
+      next = { dm: "channel", buzzTo: null, channelAccount: account, channelPerson: person, ...common };
+    }
   }
+  const before = readAlerts(db);
   writeSetting(db, KEY, next);
+  // turning the digest on starts its first window now: items alerted one by one before are not repeated
+  if (next.dm !== "off" && next.delivery === "digest" && (before.dm === "off" || before.delivery !== "digest")) writeSetting(db, DIGEST_CURSOR, now);
   return next;
 }
 
-export class AlertsError extends Error {}
+export class AlertsError extends Error {
+  readonly code: string;
+  constructor(message: string, code = "alerts_invalid") {
+    super(message);
+    this.code = code;
+  }
+}
 
 /** The text the owner receives. Title only (the agent wrote it for the owner); never the context. */
 export function alertText(item: ItemSummary): string {
+  return `${lineOf(item)}\nOpen Operator Inbox to answer.`;
+}
+
+function lineOf(item: Pick<ItemSummary, "kind" | "priority" | "title" | "from">): string {
   const what = item.kind === "approval" ? "asks for your approval" : "has a question";
   const urgent = item.priority === "urgent" || item.priority === "high" ? ` (${item.priority})` : "";
-  return `${item.from.name} ${what}${urgent}: ${item.title}\nOpen Operator Inbox to answer.`;
+  return `${item.from.name} ${what}${urgent}: ${item.title}`;
+}
+
+/** The digest text (C263 D2): count, up to DIGEST_TITLES lines, "+N more", the Inbox link when known. Never the context. */
+export function digestText(items: readonly Pick<ItemSummary, "kind" | "priority" | "title" | "from">[], link: string | null): string {
+  const n = items.length;
+  const lines = [`Operator Inbox: ${n} new ${n === 1 ? "item waits" : "items wait"} for you.`, ...items.slice(0, DIGEST_TITLES).map((i) => `- ${lineOf(i)}`)];
+  if (n > DIGEST_TITLES) lines.push(`+${n - DIGEST_TITLES} more`);
+  lines.push(link ? `Open: ${link}` : "Open Operator Inbox to answer.");
+  return lines.join("\n");
 }
 
 function companionInput(a: Alerts, text: string): { channel: "buzz" | "channel"; op: string; input: Json } | null {
@@ -70,28 +135,115 @@ function companionInput(a: Alerts, text: string): { channel: "buzz" | "channel";
 }
 
 type Send = OpContext["callApp"];
+type Table = "inbox_deliveries" | "inbox_digests";
 
-/** Records a delivery for a new item (when alerts are on) and makes the first attempt. */
+/**
+ * Records a delivery for a new item (when alerts are on, one DM per item) and makes the first attempt. In quiet hours
+ * the first attempt waits until the window ends (error `quiet_hours` until then). In digest mode no per-item row is made.
+ */
 export async function alertNewItem(db: Db, callApp: Send, item: ItemSummary, now: number): Promise<void> {
-  const target = companionInput(readAlerts(db), alertText(item));
+  const a = readAlerts(db);
+  if (a.delivery === "digest") return;
+  const target = companionInput(a, alertText(item));
   if (!target) return;
   const id = `dlv_${ulid(now)}`;
+  const quiet = inQuiet(a.quietHours, a.timeZone, now);
   db.prepare(
     `INSERT INTO inbox_deliveries (id, item_id, channel, op, input, idem_key, status, hold_id, error, attempts, next_at, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, 0, ?, ?, ?)`,
-  ).run(id, item.id, target.channel, target.op, JSON.stringify(target.input), `inbox-alert-${id}`, now, now, now);
-  await attempt(db, callApp, id, now);
+     VALUES (?, ?, ?, ?, ?, ?, 'pending', NULL, ?, 0, ?, ?, ?)`,
+  ).run(id, item.id, target.channel, target.op, JSON.stringify(target.input), `inbox-alert-${id}`, quiet ? "quiet_hours" : null, quiet ? quietEnd(a.quietHours, a.timeZone, now) : now, now, now);
+  if (!quiet) await attempt(db, callApp, "inbox_deliveries", id, now);
 }
 
-/** Repeats due pending/held sends (called lazily from ops; at most `max` per call). */
+/**
+ * Repeats due pending/held sends (called lazily from ops and from the tick; at most `max` per call). A PENDING send that
+ * falls due in quiet hours is moved to the end of the window instead (a held one is only re-checked: it runs after the
+ * owner approved it in Connect, which is the owner's own action).
+ */
 export async function retryDue(db: Db, callApp: Send, now: number, max = 3): Promise<void> {
+  const a = readAlerts(db);
+  const quiet = inQuiet(a.quietHours, a.timeZone, now);
+  const defer = (table: Table, id: string) =>
+    db.prepare(`UPDATE ${table} SET next_at = ?, error = 'quiet_hours', updated_at = ? WHERE id = ? AND status = 'pending'`).run(quietEnd(a.quietHours, a.timeZone, now), now, id);
   // (a withdrawn item's deliveries are stopped by the withdraw; the filter keeps any straggler from starving the others)
   const due = db
     .prepare(
-      "SELECT d.id FROM inbox_deliveries d WHERE d.status IN ('pending', 'held') AND d.next_at <= ? AND d.item_id NOT IN (SELECT id FROM inbox_items WHERE withdrawn_at IS NOT NULL) ORDER BY d.next_at ASC LIMIT ?",
+      "SELECT d.id, d.status FROM inbox_deliveries d WHERE d.status IN ('pending', 'held') AND d.next_at <= ? AND d.item_id NOT IN (SELECT id FROM inbox_items WHERE withdrawn_at IS NOT NULL) ORDER BY d.next_at ASC LIMIT ?",
     )
     .all(now, max);
-  for (const d of due) await attempt(db, callApp, String(d.id), now);
+  for (const d of due) {
+    if (quiet && d.status === "pending") defer("inbox_deliveries", String(d.id));
+    else await attempt(db, callApp, "inbox_deliveries", String(d.id), now);
+  }
+  const digests = db.prepare("SELECT id, status FROM inbox_digests WHERE status IN ('pending', 'held') AND next_at <= ? ORDER BY next_at ASC LIMIT ?").all(now, max);
+  for (const d of digests) {
+    if (quiet && d.status === "pending") defer("inbox_digests", String(d.id));
+    else await attempt(db, callApp, "inbox_digests", String(d.id), now);
+  }
+}
+
+/**
+ * The digest state of one item for the owner's view: the newest digest that names it, else "next" (with about when)
+ * while the item is open and alerts are in digest mode, else null.
+ */
+export function digestOf(db: Db, item: { id: string; status: string }, now: number): { status: "next" | "pending" | "held" | "sent" | "failed"; at: string; error: string | null } | null {
+  const d = db.prepare("SELECT d.status, d.error, d.updated_at FROM inbox_digests d, json_each(d.item_ids) j WHERE j.value = ? ORDER BY d.created_at DESC, d.id DESC LIMIT 1").get(item.id);
+  if (d) return { status: d.status as "pending" | "held" | "sent" | "failed", at: new Date(Number(d.updated_at)).toISOString(), error: d.error === null || d.error === undefined ? null : String(d.error) };
+  const next = item.status === "open" ? nextDigestAt(db, now) : null;
+  return next === null ? null : { status: "next", at: new Date(next).toISOString(), error: null };
+}
+
+/** When the next digest is due (ms), or null when alerts are not in digest mode. */
+export function nextDigestAt(db: Db, now: number): number | null {
+  const a = readAlerts(db);
+  if (a.dm === "off" || a.delivery !== "digest") return null;
+  const due = readSetting<number>(db, DIGEST_CURSOR, now) + a.digestEveryMin * 60_000;
+  return quietEnd(a.quietHours, a.timeZone, Math.max(due, now));
+}
+
+/**
+ * Background tick (digest mode): when the window is over and it is not quiet, freeze the open items asked in the window
+ * into one digest row and send it. An empty window moves the cursor and sends nothing. Cursor move and row insert are
+ * one transaction, so a crash between them can never send a window twice or skip it.
+ */
+export async function digestTick(db: Db, callApp: Send, ownerLink: (path: string) => string | null, now: number): Promise<void> {
+  const a = readAlerts(db);
+  if (a.dm === "off" || a.delivery !== "digest") return;
+  const cursor = readSetting<number>(db, DIGEST_CURSOR, now);
+  if (now < cursor + a.digestEveryMin * 60_000 || inQuiet(a.quietHours, a.timeZone, now)) return;
+  let link: string | null = null;
+  try {
+    link = ownerLink("/");
+  } catch {
+    link = null;
+  }
+  const id = db.transaction(() => {
+    if (readSetting<number>(db, DIGEST_CURSOR, now) !== cursor) return null; // another tick built this window
+    writeSetting(db, DIGEST_CURSOR, now);
+    const rows = db
+      .prepare(
+        `SELECT id, kind, priority, title, from_type, from_id, from_name FROM inbox_items
+         WHERE created_at > ? AND created_at <= ? AND status = 'open' AND expires_at > ? AND withdrawn_at IS NULL AND (snoozed_until IS NULL OR snoozed_until <= ?)
+         ORDER BY created_at ASC, id ASC`,
+      )
+      .all(cursor, now, now, now);
+    if (rows.length === 0) return null;
+    const items = rows.map((r) => ({
+      kind: r.kind as ItemSummary["kind"],
+      priority: r.priority as ItemSummary["priority"],
+      title: String(r.title),
+      from: { type: r.from_type as ItemSummary["from"]["type"], id: String(r.from_id), name: String(r.from_name) },
+    }));
+    const target = companionInput(a, digestText(items, link));
+    if (!target) return null;
+    const did = `dgs_${ulid(now)}`;
+    db.prepare(
+      `INSERT INTO inbox_digests (id, window_from, window_to, item_ids, channel, op, input, idem_key, status, hold_id, error, attempts, next_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, 0, ?, ?, ?)`,
+    ).run(did, cursor, now, JSON.stringify(rows.map((r) => String(r.id))), target.channel, target.op, JSON.stringify(target.input), `inbox-digest-${did}`, now, now, now);
+    return did;
+  });
+  if (id) await attempt(db, callApp, "inbox_digests", id, now);
 }
 
 function errorCode(e: unknown): string {
@@ -99,20 +251,24 @@ function errorCode(e: unknown): string {
   return typeof code === "string" && code ? code.slice(0, 64) : "send_failed";
 }
 
-async function attempt(db: Db, callApp: Send, id: string, now: number): Promise<void> {
-  // no send for a withdrawn item (inbox_withdraw closes its deliveries; this is the read-side guard)
-  const d = db
-    .prepare(
-      "SELECT d.op, d.input, d.idem_key, d.attempts, d.hold_id FROM inbox_deliveries d JOIN inbox_items i ON i.id = d.item_id WHERE d.id = ? AND d.status IN ('pending', 'held') AND i.withdrawn_at IS NULL",
-    )
-    .get(id);
+async function attempt(db: Db, callApp: Send, table: Table, id: string, now: number): Promise<void> {
+  // no send for a withdrawn item (inbox_withdraw closes its deliveries; this is the read-side guard). A digest has no
+  // such guard: its input was frozen when it was built and names several items.
+  const d =
+    table === "inbox_deliveries"
+      ? db
+          .prepare(
+            "SELECT d.op, d.input, d.idem_key, d.attempts, d.hold_id FROM inbox_deliveries d JOIN inbox_items i ON i.id = d.item_id WHERE d.id = ? AND d.status IN ('pending', 'held') AND i.withdrawn_at IS NULL",
+          )
+          .get(id)
+      : db.prepare("SELECT op, input, idem_key, attempts, hold_id FROM inbox_digests WHERE id = ? AND status IN ('pending', 'held')").get(id);
   if (!d) return;
   const attempts = Number(d.attempts) + 1;
   // The send is awaited, so a withdraw can close this delivery meanwhile (status failed, error withdrawn). Every write here
-  // is guarded on the delivery still being pending or held: the result of a send never overwrites a closed delivery.
+  // is guarded on the row still being pending or held: the result of a send never overwrites a closed row.
   const set = (status: string, holdId: string | null, error: string | null) =>
     db
-      .prepare("UPDATE inbox_deliveries SET status = ?, hold_id = COALESCE(?, hold_id), error = ?, attempts = ?, next_at = ?, updated_at = ? WHERE id = ? AND status IN ('pending', 'held')")
+      .prepare(`UPDATE ${table} SET status = ?, hold_id = COALESCE(?, hold_id), error = ?, attempts = ?, next_at = ?, updated_at = ? WHERE id = ? AND status IN ('pending', 'held')`)
       .run(status, holdId, error, attempts, now + RETRY_AFTER_MS, now, id);
   if (attempts > MAX_ATTEMPTS) {
     set("failed", null, "gave_up");
@@ -137,9 +293,9 @@ async function attempt(db: Db, callApp: Send, id: string, now: number): Promise<
     if (first && String(d.op) !== first) {
       // Connect: the owner's address was never written to from the workspace sender. Switch to the first-contact op
       // (Connect holds it for the owner's approval), same input and key, and try it at once.
-      db.prepare("UPDATE inbox_deliveries SET op = ?, updated_at = ? WHERE id = ? AND status IN ('pending', 'held')").run(first, now, id);
+      db.prepare(`UPDATE ${table} SET op = ?, updated_at = ? WHERE id = ? AND status IN ('pending', 'held')`).run(first, now, id);
       clearTimeout(timer);
-      return attempt(db, callApp, id, now);
+      return attempt(db, callApp, table, id, now);
     }
     // denied hold, no grant (Connect not deployed), no sender identity, paused…: final, shown to the owner
     set("failed", null, code);
