@@ -34,8 +34,8 @@ export function readAlerts(db: Db): Alerts {
   return readSetting(db, KEY, ALERTS_OFF);
 }
 
-/** Validates and stores the setting. Fields of the other channel are cleared, so nothing stale lingers. */
-export function writeAlerts(db: Db, input: Alerts): Alerts {
+/** Validates and stores the setting. Only `dm` is required; the other channel's fields may be left out. They are cleared, so nothing stale lingers. */
+export function writeAlerts(db: Db, input: Pick<Alerts, "dm"> & Partial<Alerts>): Alerts {
   const blank = (v: string | null | undefined) => (v?.trim() ? v.trim() : null);
   let next: Alerts;
   if (input.dm === "off") next = ALERTS_OFF;
