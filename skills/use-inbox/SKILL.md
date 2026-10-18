@@ -12,6 +12,7 @@ description: How to ask the owner a question or request the owner's approval thr
   - `question`: the owner answers in words (answer) or asks you to clarify.
 - Put the facts the owner needs in `context`: what you want to do, the options, and what happens next.
 - Optional: `priority` (low, normal, high, urgent), `responses` (limit the allowed answers), `expiresInS` (default 7 days).
+- Do not send `open`: only an app can link an item to one of its pages. An agent gets `open_not_allowed`.
 - Always send an idempotency key. If you repeat the call with the same key and the same input, you get the first item back, not a second one.
 - Keep the returned `itemId`. Do not wait in a loop inside one turn; continue with other work.
 

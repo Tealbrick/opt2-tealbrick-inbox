@@ -283,6 +283,7 @@ test("upgrade from a 0.2.9 database: old rows load, an old agent item can be wit
   db.prepare("INSERT INTO inbox_decisions (id, item_id, response, message, decided_by, decided_at, item_version) VALUES ('dcs_1', 'itm_old_done', 'approve', NULL, ?, ?, 1)").run(OWNER.id, NOW - 1500);
 
   migrate(db, 2);
+  migrate(db, 3);
 
   // the owner's view loads the old rows with the new fields at their neutral values
   const listed = store.list(db, "all", 50, 0, NOW);

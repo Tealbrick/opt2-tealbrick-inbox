@@ -9,6 +9,7 @@
 // holds overview and the alert setting.
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { isValidLaunchPath } from "@opt2-tealbrick/manifest";
 import { type AppDefinition, defineApp, type HandlerSpec, type OpContext, type SdkAppDefinition, type SdkOpContext, type StartContext, TbError } from "@opt2-tealbrick/miniapp-sdk";
 import {
   type AlertsGetInput,
@@ -111,7 +112,14 @@ export const handlers = {
     redact: (input) => clip(`${input.kind}: ${input.title}`, 280),
     async run(input, ctx) {
       const now = begin(ctx);
-      const item = store.ask(ctx.db, actorOf(ctx), input, now);
+      const actor = actorOf(ctx);
+      if (input.open !== undefined) {
+        // R5, fail closed: the link always opens the VERIFIED product of the caller, so only such a caller may name a page
+        if (actor.type !== "app") throw new TbError("open_not_allowed", "Only an app can link an item to one of its pages.", 400);
+        if (actor.product === null) throw new TbError("caller_unverified", "The calling app has no verified product, so it cannot link an item to a page.", 403);
+        if (!isValidLaunchPath(input.open.path)) throw new TbError("path_invalid", "open.path must be a page of your app such as /review/<id> (no scheme, host, // or ..).", 400);
+      }
+      const item = store.ask(ctx.db, actor, input, now);
       ctx.statusChanged();
       try {
         await alertNewItem(ctx.db, ctx.callApp, item, now);
@@ -163,7 +171,16 @@ export const handlers = {
   [OP.itemGet]: op<ItemGetInput, ItemGetOutput>({
     async run(input, ctx) {
       owner(ctx);
-      return store.get(ctx.db, input.itemId, begin(ctx));
+      const c = ctx as SdkOpContext;
+      return store.get(ctx.db, input.itemId, begin(ctx), (product, path) => {
+        try {
+          return c.ownerLinkFor(product, path);
+        } catch (e) {
+          // a stored page the shared rule refuses is shown as no link; say why (never the path itself)
+          ctx.log.warn("open link refused", { item: input.itemId, code: e instanceof TbError ? e.code : "unknown" });
+          return null;
+        }
+      });
     },
   }),
   [OP.itemDecide]: op<ItemDecideInput, ItemDecideOutput>({
