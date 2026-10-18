@@ -30,6 +30,9 @@ const ALERT_ERRORS: Record<string, string> = {
   no_grant: "Connect is not in this workspace",
   denied: "you denied it in Connect",
   quiet_hours: "waits for your quiet hours to end",
+  closed: "the item was answered or expired before it was sent",
+  alerts_off: "you turned alerts off",
+  alerts_changed: "you changed the alert settings",
 };
 const SNOOZE: { value: string; label: string; ms: number }[] = [
   { value: "1h", label: "1 hour", ms: 3600_000 },

@@ -110,7 +110,7 @@ export function SettingsPage() {
                     value={form.quietHours ? "on" : "off"}
                     onValueChange={(v) =>
                       // the browser zone fills the field as a suggestion; nothing is stored before Save
-                      set(v === "on" ? { quietHours: form.quietHours ?? { start: "22:00", end: "07:00" }, timeZone: form.timeZone ?? browserZone() } : { quietHours: null })
+                      set(v === "on" ? { quietHours: form.quietHours ?? { start: "22:00", end: "07:00" }, timeZone: form.timeZone ?? browserZone() } : { quietHours: null, timeZone: data?.timeZone ?? null })
                     }
                     options={[
                       { value: "off", label: "Off" },

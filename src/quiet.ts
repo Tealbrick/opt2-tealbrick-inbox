@@ -10,7 +10,7 @@ export interface QuietHours {
 }
 
 const HHMM = /^([01]\d|2[0-3]):([0-5]\d)$/;
-const STEP_MS = 5 * 60_000;
+const MINUTE_MS = 60_000;
 const MAX_LOOKAHEAD_MS = 48 * 3600_000;
 
 export const validHhmm = (s: unknown): s is string => typeof s === "string" && HHMM.test(s);
@@ -60,11 +60,11 @@ export function inQuiet(q: QuietHours | null, tz: string | null, at: number): bo
 }
 
 /**
- * The first instant (on a 5-minute grid from `at`) when quiet is over; `at` itself when not in quiet hours. Bounded to
- * 48 h, so a bad zone or window can never park an alert forever.
+ * The first whole minute after `at` when quiet is over (local wall times change on whole minutes); `at` itself when not
+ * in quiet hours. Bounded to 48 h, so a bad zone or window can never park an alert forever.
  */
 export function quietEnd(q: QuietHours | null, tz: string | null, at: number): number {
   if (!inQuiet(q, tz, at)) return at;
-  for (let t = at + STEP_MS; t <= at + MAX_LOOKAHEAD_MS; t += STEP_MS) if (!inQuiet(q, tz, t)) return t;
+  for (let t = Math.floor(at / MINUTE_MS) * MINUTE_MS + MINUTE_MS; t <= at + MAX_LOOKAHEAD_MS; t += MINUTE_MS) if (!inQuiet(q, tz, t)) return t;
   return at + MAX_LOOKAHEAD_MS;
 }

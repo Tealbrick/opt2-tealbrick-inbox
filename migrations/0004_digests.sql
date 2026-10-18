@@ -20,3 +20,5 @@ CREATE TABLE inbox_digests (
   updated_at INTEGER NOT NULL
 );
 CREATE INDEX inbox_digests_due ON inbox_digests (status, next_at);
+-- item_get finds the digest of an item among the windows that ended after the item was asked
+CREATE INDEX inbox_digests_window ON inbox_digests (window_to);

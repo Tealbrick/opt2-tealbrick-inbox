@@ -30,6 +30,14 @@ export const ALERTS_OFF: Alerts = { dm: "off", buzzTo: null, channelAccount: nul
 const KEY = "alerts";
 /** The end of the last digest window (ms); set when digest delivery is turned on, moved by every digest build. */
 const DIGEST_CURSOR = "alerts_digest_cursor";
+/** A window left open when the owner switched from the digest to one DM per item: the next tick still sends it, once. */
+const DIGEST_FLUSH = "alerts_digest_flush";
+/** One sender at a time per row (the tick, an op's retry, a new ask): a send takes this lease first (> SEND_TIMEOUT_MS). */
+const LEASE_MS = 30_000;
+/** At most this many items are named (and counted) in one digest. */
+export const DIGEST_MAX_ITEMS = 1000;
+/** Sent or failed digests older than this are removed by the tick. */
+export const DIGEST_KEEP_MS = 90 * 24 * 3600 * 1000;
 export const CONNECT = "connect";
 export const SEND_TIMEOUT_MS = 5000;
 /** Retry schedule for pending/held sends (a hold lives 15 min by default; give up after about an hour). */
@@ -92,11 +100,28 @@ export function writeAlerts(db: Db, input: AlertsInput, now = Date.now()): Alert
       next = { dm: "channel", buzzTo: null, channelAccount: account, channelPerson: person, ...common };
     }
   }
-  const before = readAlerts(db);
-  writeSetting(db, KEY, next);
-  // turning the digest on starts its first window now: items alerted one by one before are not repeated
-  if (next.dm !== "off" && next.delivery === "digest" && (before.dm === "off" || before.delivery !== "digest")) writeSetting(db, DIGEST_CURSOR, now);
+  db.transaction(() => {
+    const before = readAlerts(db);
+    writeSetting(db, KEY, next);
+    // a send that still waits for the old target, or for alerts that are now off, never goes out
+    if (targetOf(before) !== targetOf(next)) closeUnsent(db, next.dm === "off" ? "alerts_off" : "alerts_changed", now);
+    const wasDigest = before.dm !== "off" && before.delivery === "digest";
+    const isDigest = next.dm !== "off" && next.delivery === "digest";
+    // turning the digest on starts its first window now: items alerted one by one before are not repeated
+    if (isDigest && !wasDigest) writeSetting(db, DIGEST_CURSOR, now);
+    // leaving the digest for one DM per item: the open window is still sent, once, by the next tick
+    if (wasDigest && !isDigest && next.dm !== "off") writeSetting(db, DIGEST_FLUSH, { from: readSetting<number>(db, DIGEST_CURSOR, now), to: now });
+    if (next.dm === "off") writeSetting(db, DIGEST_FLUSH, null);
+  });
   return next;
+}
+
+const targetOf = (a: Alerts): string => (a.dm === "off" ? "off" : JSON.stringify([a.dm, a.buzzTo, a.channelAccount, a.channelPerson]));
+
+/** Every send that has not gone out yet (pending or held, item DMs and digests) is closed with `error`. */
+function closeUnsent(db: Db, error: string, now: number): void {
+  for (const t of ["inbox_deliveries", "inbox_digests"] as const)
+    db.prepare(`UPDATE ${t} SET status = 'failed', error = ?, updated_at = ? WHERE status IN ('pending', 'held')`).run(error, now);
 }
 
 export class AlertsError extends Error {
@@ -112,10 +137,13 @@ export function alertText(item: ItemSummary): string {
   return `${lineOf(item)}\nOpen Operator Inbox to answer.`;
 }
 
+/** One line per item: line breaks in the caller's name or title are collapsed, so they can never forge a line of the DM. */
+const oneLine = (v: string): string => v.replace(/\s+/g, " ").trim();
+
 function lineOf(item: Pick<ItemSummary, "kind" | "priority" | "title" | "from">): string {
   const what = item.kind === "approval" ? "asks for your approval" : "has a question";
   const urgent = item.priority === "urgent" || item.priority === "high" ? ` (${item.priority})` : "";
-  return `${item.from.name} ${what}${urgent}: ${item.title}`;
+  return `${oneLine(item.from.name)} ${what}${urgent}: ${oneLine(item.title)}`;
 }
 
 /** The digest text (C263 D2): count, up to DIGEST_TITLES lines, "+N more", the Inbox link when known. Never the context. */
@@ -184,12 +212,20 @@ export async function retryDue(db: Db, callApp: Send, now: number, max = 3): Pro
 
 /**
  * The digest state of one item for the owner's view: the newest digest that names it, else "next" (with about when)
- * while the item is open and alerts are in digest mode, else null.
+ * while the item is open, unsnoozed, asked after the current window started and alerts are in digest mode, else null.
  */
-export function digestOf(db: Db, item: { id: string; status: string }, now: number): { status: "next" | "pending" | "held" | "sent" | "failed"; at: string; error: string | null } | null {
-  const d = db.prepare("SELECT d.status, d.error, d.updated_at FROM inbox_digests d, json_each(d.item_ids) j WHERE j.value = ? ORDER BY d.created_at DESC, d.id DESC LIMIT 1").get(item.id);
+export function digestOf(
+  db: Db,
+  item: { id: string; status: string; createdAt: string; snoozedUntil: string | null },
+  now: number,
+): { status: "next" | "pending" | "held" | "sent" | "failed"; at: string; error: string | null } | null {
+  const created = Date.parse(item.createdAt);
+  const d = db
+    .prepare("SELECT d.status, d.error, d.updated_at FROM inbox_digests d, json_each(d.item_ids) j WHERE d.window_to >= ? AND j.value = ? ORDER BY d.created_at DESC, d.id DESC LIMIT 1")
+    .get(created, item.id);
   if (d) return { status: d.status as "pending" | "held" | "sent" | "failed", at: new Date(Number(d.updated_at)).toISOString(), error: d.error === null || d.error === undefined ? null : String(d.error) };
-  const next = item.status === "open" ? nextDigestAt(db, now) : null;
+  const cursor = readSetting<number | null>(db, DIGEST_CURSOR, null);
+  const next = item.status === "open" && item.snoozedUntil === null && cursor !== null && created > cursor ? nextDigestAt(db, now) : null;
   return next === null ? null : { status: "next", at: new Date(next).toISOString(), error: null };
 }
 
@@ -201,47 +237,72 @@ export function nextDigestAt(db: Db, now: number): number | null {
   return quietEnd(a.quietHours, a.timeZone, Math.max(due, now));
 }
 
+/** Removes sent and failed digests older than DIGEST_KEEP_MS (the item history keeps no reference to them). */
+export function pruneDigests(db: Db, now: number): number {
+  return Number(db.prepare("DELETE FROM inbox_digests WHERE status IN ('sent', 'failed') AND updated_at < ?").run(now - DIGEST_KEEP_MS).changes);
+}
+
+/** Inserts the digest row for the open items asked in (from, to]; null when there is none. Runs inside the caller's transaction. */
+function buildDigest(db: Db, a: Alerts, from: number, to: number, now: number, link: string | null): string | null {
+  const rows = db
+    .prepare(
+      `SELECT id, kind, priority, title, from_type, from_id, from_name FROM inbox_items
+       WHERE created_at > ? AND created_at <= ? AND status = 'open' AND expires_at > ? AND withdrawn_at IS NULL AND (snoozed_until IS NULL OR snoozed_until <= ?)
+       ORDER BY created_at ASC, id ASC LIMIT ?`,
+    )
+    .all(from, to, now, now, DIGEST_MAX_ITEMS);
+  if (rows.length === 0) return null;
+  const items = rows.map((r) => ({
+    kind: r.kind as ItemSummary["kind"],
+    priority: r.priority as ItemSummary["priority"],
+    title: String(r.title),
+    from: { type: r.from_type as ItemSummary["from"]["type"], id: String(r.from_id), name: String(r.from_name) },
+  }));
+  const target = companionInput(a, digestText(items, link));
+  if (!target) return null;
+  const id = `dgs_${ulid(now)}`;
+  db.prepare(
+    `INSERT INTO inbox_digests (id, window_from, window_to, item_ids, channel, op, input, idem_key, status, hold_id, error, attempts, next_at, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, 0, ?, ?, ?)`,
+  ).run(id, from, to, JSON.stringify(rows.map((r) => String(r.id))), target.channel, target.op, JSON.stringify(target.input), `inbox-digest-${id}`, now, now, now);
+  return id;
+}
+
 /**
- * Background tick (digest mode): when the window is over and it is not quiet, freeze the open items asked in the window
- * into one digest row and send it. An empty window moves the cursor and sends nothing. Cursor move and row insert are
- * one transaction, so a crash between them can never send a window twice or skip it.
+ * Background tick: (1) a window left open by a switch to one DM per item is sent once; (2) in digest mode, when the
+ * window is over, it is not quiet and no earlier digest waits for the owner's approval in Connect, the open items asked
+ * in the window are frozen into one digest row and sent. An empty window moves the cursor and sends nothing. A held
+ * digest keeps the window open (the next digest then covers both windows), so unanswered holds never pile up. The
+ * cursor move and the row insert are one transaction: a crash between them can never send a window twice or skip it.
  */
 export async function digestTick(db: Db, callApp: Send, ownerLink: (path: string) => string | null, now: number): Promise<void> {
   const a = readAlerts(db);
-  if (a.dm === "off" || a.delivery !== "digest") return;
-  const cursor = readSetting<number>(db, DIGEST_CURSOR, now);
-  if (now < cursor + a.digestEveryMin * 60_000 || inQuiet(a.quietHours, a.timeZone, now)) return;
+  if (inQuiet(a.quietHours, a.timeZone, now)) return;
   let link: string | null = null;
   try {
     link = ownerLink("/");
   } catch {
     link = null;
   }
+  const flush = readSetting<{ from: number; to: number } | null>(db, DIGEST_FLUSH, null);
+  if (flush) {
+    const fid = db.transaction(() => {
+      writeSetting(db, DIGEST_FLUSH, null);
+      return a.dm === "off" ? null : buildDigest(db, a, flush.from, flush.to, now, link);
+    });
+    if (fid) await attempt(db, callApp, "inbox_digests", fid, now);
+  }
+  if (a.dm === "off" || a.delivery !== "digest") return;
+  const cursor = readSetting<number | null>(db, DIGEST_CURSOR, null);
+  if (cursor === null) {
+    writeSetting(db, DIGEST_CURSOR, now); // a digest setting without its window (written by hand or an old crash) starts now
+    return;
+  }
+  if (now < cursor + a.digestEveryMin * 60_000) return;
+  if (db.prepare("SELECT 1 AS x FROM inbox_digests WHERE status = 'held' LIMIT 1").get()) return;
   const id = db.transaction(() => {
-    if (readSetting<number>(db, DIGEST_CURSOR, now) !== cursor) return null; // another tick built this window
     writeSetting(db, DIGEST_CURSOR, now);
-    const rows = db
-      .prepare(
-        `SELECT id, kind, priority, title, from_type, from_id, from_name FROM inbox_items
-         WHERE created_at > ? AND created_at <= ? AND status = 'open' AND expires_at > ? AND withdrawn_at IS NULL AND (snoozed_until IS NULL OR snoozed_until <= ?)
-         ORDER BY created_at ASC, id ASC`,
-      )
-      .all(cursor, now, now, now);
-    if (rows.length === 0) return null;
-    const items = rows.map((r) => ({
-      kind: r.kind as ItemSummary["kind"],
-      priority: r.priority as ItemSummary["priority"],
-      title: String(r.title),
-      from: { type: r.from_type as ItemSummary["from"]["type"], id: String(r.from_id), name: String(r.from_name) },
-    }));
-    const target = companionInput(a, digestText(items, link));
-    if (!target) return null;
-    const did = `dgs_${ulid(now)}`;
-    db.prepare(
-      `INSERT INTO inbox_digests (id, window_from, window_to, item_ids, channel, op, input, idem_key, status, hold_id, error, attempts, next_at, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, 0, ?, ?, ?)`,
-    ).run(did, cursor, now, JSON.stringify(rows.map((r) => String(r.id))), target.channel, target.op, JSON.stringify(target.input), `inbox-digest-${did}`, now, now, now);
-    return did;
+    return buildDigest(db, a, cursor, now, now, link);
   });
   if (id) await attempt(db, callApp, "inbox_digests", id, now);
 }
@@ -251,17 +312,40 @@ function errorCode(e: unknown): string {
   return typeof code === "string" && code ? code.slice(0, 64) : "send_failed";
 }
 
-async function attempt(db: Db, callApp: Send, table: Table, id: string, now: number): Promise<void> {
-  // no send for a withdrawn item (inbox_withdraw closes its deliveries; this is the read-side guard). A digest has no
-  // such guard: its input was frozen when it was built and names several items.
-  const d =
-    table === "inbox_deliveries"
-      ? db
-          .prepare(
-            "SELECT d.op, d.input, d.idem_key, d.attempts, d.hold_id FROM inbox_deliveries d JOIN inbox_items i ON i.id = d.item_id WHERE d.id = ? AND d.status IN ('pending', 'held') AND i.withdrawn_at IS NULL",
-          )
-          .get(id)
-      : db.prepare("SELECT op, input, idem_key, attempts, hold_id FROM inbox_digests WHERE id = ? AND status IN ('pending', 'held')").get(id);
+async function attempt(db: Db, callApp: Send, table: Table, id: string, now: number, leased = false): Promise<void> {
+  if (!leased) {
+    // the lease: of two callers that found the same due row (the tick, an op's retry, a new ask), only one sends it
+    const got = db.prepare(`UPDATE ${table} SET next_at = ? WHERE id = ? AND status IN ('pending', 'held') AND next_at <= ?`).run(now + LEASE_MS, id, now).changes;
+    if (got !== 1) return;
+  }
+  const close = (error: string) => db.prepare(`UPDATE ${table} SET status = 'failed', error = ?, updated_at = ? WHERE id = ? AND status IN ('pending', 'held')`).run(error, now, id);
+  if (table === "inbox_deliveries") {
+    // an item DM only for an item that still waits: not withdrawn (inbox_withdraw closes it), not answered, not expired
+    const i = db.prepare("SELECT i.status, i.expires_at, i.withdrawn_at FROM inbox_deliveries d JOIN inbox_items i ON i.id = d.item_id WHERE d.id = ?").get(id);
+    if (!i || (i.withdrawn_at !== null && i.withdrawn_at !== undefined)) {
+      close("withdrawn");
+      return;
+    }
+    if (i.status !== "open" || Number(i.expires_at) <= now) {
+      close("closed");
+      return;
+    }
+  } else {
+    // a digest's text is frozen at build time; before its FIRST send, drop it when every item it names is closed by now
+    const g = db.prepare("SELECT attempts, item_ids FROM inbox_digests WHERE id = ?").get(id);
+    const open = g
+      ? Number(
+          db
+            .prepare("SELECT COUNT(*) AS n FROM inbox_items WHERE id IN (SELECT value FROM json_each(?)) AND status = 'open' AND withdrawn_at IS NULL AND expires_at > ?")
+            .get(String(g.item_ids), now)?.n ?? 0,
+        )
+      : 0;
+    if (g && Number(g.attempts) === 0 && open === 0) {
+      close("closed");
+      return;
+    }
+  }
+  const d = db.prepare(`SELECT op, input, idem_key, attempts, hold_id FROM ${table} WHERE id = ? AND status IN ('pending', 'held')`).get(id);
   if (!d) return;
   const attempts = Number(d.attempts) + 1;
   // The send is awaited, so a withdraw can close this delivery meanwhile (status failed, error withdrawn). Every write here
@@ -295,7 +379,7 @@ async function attempt(db: Db, callApp: Send, table: Table, id: string, now: num
       // (Connect holds it for the owner's approval), same input and key, and try it at once.
       db.prepare(`UPDATE ${table} SET op = ?, updated_at = ? WHERE id = ? AND status IN ('pending', 'held')`).run(first, now, id);
       clearTimeout(timer);
-      return attempt(db, callApp, table, id, now);
+      return attempt(db, callApp, table, id, now, true);
     }
     // denied hold, no grant (Connect not deployed), no sender identity, paused…: final, shown to the owner
     set("failed", null, code);

@@ -41,7 +41,7 @@ import {
   OP,
   type OpId,
 } from "#kit";
-import { AlertsError, alertNewItem, digestOf, digestTick, readAlerts, retryDue, writeAlerts } from "./alerts.ts";
+import { AlertsError, alertNewItem, digestOf, digestTick, pruneDigests, readAlerts, retryDue, writeAlerts } from "./alerts.ts";
 import { overview } from "./holds.ts";
 import * as store from "./store.ts";
 
@@ -70,6 +70,7 @@ export async function tick(ctx: Pick<StartContext, "db" | "log" | "callApp" | "s
     if (store.expireDue(ctx.db, now) > 0) ctx.statusChanged();
     try {
       store.pruneActivity(ctx.db, now);
+      pruneDigests(ctx.db, now);
     } catch (e) {
       // a prune problem must never stop the alert retries of this tick
       ctx.log.warn("inbox activity prune failed", { error: e instanceof Error ? e.message : "unknown" });

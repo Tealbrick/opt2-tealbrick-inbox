@@ -268,3 +268,217 @@ test("digest: a window that ends in quiet hours is sent when they end; turning t
 test("digestText without a Portal link ends with the plain hint", () => {
   assert.equal(digestText([{ kind: "question", priority: "normal", title: "t", from: { type: "agent", id: "a", name: "Scout" } }], null), "Operator Inbox: 1 new item waits for you.\n- Scout has a question: t\nOpen Operator Inbox to answer.");
 });
+
+// ── review round (S2-1, S2-2, S3) ──
+
+const deliveryOf = async (db: ReturnType<typeof memoryDb>, itemId: string) => (await h.item_get.run({ itemId }, ctxFor(db, OWNER))).deliveries[0];
+const digests = (db: ReturnType<typeof memoryDb>) => db.prepare("SELECT status, error, item_ids FROM inbox_digests ORDER BY created_at, id").all();
+
+test("S2-1: a DM that waits for quiet hours is never sent for an item answered or expired meanwhile; an item still open is sent", async (t) => {
+  const c = clockAt("2026-10-18T21:00:00Z"); // 23:00 Berlin
+  t.after(() => c.restore());
+  const db = memoryDb();
+  await h.alerts_set.run(alerts({ quietHours: NIGHT, timeZone: BERLIN }), ctxFor(db, OWNER));
+  const conn = fakeConnect();
+  const answered = await h.inbox_ask.run({ kind: "question", title: "answered at night" }, ctxFor(db, AGENT, conn.callApp));
+  const short = await h.inbox_ask.run({ kind: "question", title: "expires at night", expiresInS: 3600 }, ctxFor(db, AGENT, conn.callApp));
+  const open = await h.inbox_ask.run({ kind: "question", title: "still open" }, ctxFor(db, AGENT, conn.callApp));
+  c.set("2026-10-18T21:30:00Z");
+  await h.item_decide.run({ itemId: answered.itemId, response: "answer", message: "done", version: 1 }, ctxFor(db, OWNER));
+  c.set("2026-10-19T05:00:00Z");
+  await tick(startCtx(db, conn.callApp) as never, c.now);
+  await tick(startCtx(db, conn.callApp) as never, c.now);
+  assert.deepEqual(
+    conn.sent.map((s) => (s.input as { content: string }).content.split("\n")[0]),
+    ["Scout has a question: still open"],
+  );
+  for (const id of [answered.itemId, short.itemId]) assert.deepEqual([(await deliveryOf(db, id)).status, (await deliveryOf(db, id)).error], ["failed", "closed"]);
+  assert.equal((await deliveryOf(db, open.itemId)).status, "sent");
+});
+
+test("retryDue: a PENDING send that falls due in quiet hours moves to the end of the window (no send); after it, it goes out", async (t) => {
+  const c = clockAt("2026-10-18T19:00:00Z"); // 21:00 Berlin
+  t.after(() => c.restore());
+  const db = memoryDb();
+  await h.alerts_set.run(alerts({ quietHours: NIGHT, timeZone: BERLIN }), ctxFor(db, OWNER));
+  const conn = fakeConnect(() => ({ status: "held", holdId: "hld_p", expiresAt: "x" }));
+  const { itemId } = await h.inbox_ask.run({ kind: "question", title: "x" }, ctxFor(db, AGENT, conn.callApp));
+  // as after a timeout: pending again, due at 22:01
+  db.prepare("UPDATE inbox_deliveries SET status = 'pending', hold_id = NULL, next_at = ? WHERE item_id = ?").run(Date.parse("2026-10-18T20:01:00Z"), itemId);
+  c.set("2026-10-18T20:01:00Z");
+  await tick(startCtx(db, conn.callApp) as never, c.now);
+  assert.equal(conn.sent.length, 1, "no second send in quiet hours");
+  const row = db.prepare("SELECT next_at, error FROM inbox_deliveries WHERE item_id = ?").get(itemId);
+  assert.deepEqual([row?.next_at, row?.error], [Date.parse("2026-10-19T05:00:00Z"), "quiet_hours"]);
+  c.set("2026-10-19T05:00:00Z");
+  const ok = fakeConnect();
+  await tick(startCtx(db, ok.callApp) as never, c.now);
+  assert.equal(ok.sent.length, 1);
+});
+
+test("S2-2: switching from the digest to one DM per item still sends the open window once; later items get their own DM; switching off drops it", async (t) => {
+  const c = clockAt("2026-10-18T10:00:00Z");
+  t.after(() => c.restore());
+  const db = memoryDb();
+  const conn = fakeConnect();
+  await h.alerts_set.run(alerts({ delivery: "digest", digestEveryMin: 60 }), ctxFor(db, OWNER));
+  c.set("2026-10-18T10:10:00Z");
+  await h.inbox_ask.run({ kind: "question", title: "w1" }, ctxFor(db, AGENT, conn.callApp));
+  await h.inbox_ask.run({ kind: "question", title: "w2" }, ctxFor(db, AGENT, conn.callApp));
+  c.set("2026-10-18T10:30:00Z");
+  await h.alerts_set.run(alerts({ delivery: "each" }), ctxFor(db, OWNER));
+  await tick(startCtx(db, conn.callApp) as never, c.now);
+  assert.equal(conn.sent.length, 1);
+  assert.match(String((conn.sent[0]?.input as { content: string } | undefined)?.content), /^Operator Inbox: 2 new items wait for you\.\n- Scout has a question: w1\n- Scout has a question: w2\n/);
+  await tick(startCtx(db, conn.callApp) as never, c.now + 60_000);
+  assert.equal(conn.sent.length, 1, "the flush runs once");
+  await h.inbox_ask.run({ kind: "question", title: "after" }, ctxFor(db, AGENT, conn.callApp));
+  assert.equal(conn.sent.length, 2, "one DM per item again");
+
+  // digest → off: the open window is not sent
+  const db2 = memoryDb();
+  const conn2 = fakeConnect();
+  c.set("2026-10-18T10:00:00Z");
+  await h.alerts_set.run(alerts({ delivery: "digest", digestEveryMin: 60 }), ctxFor(db2, OWNER));
+  c.set("2026-10-18T10:10:00Z");
+  await h.inbox_ask.run({ kind: "question", title: "w1" }, ctxFor(db2, AGENT, conn2.callApp));
+  await h.alerts_set.run({ dm: "off" }, ctxFor(db2, OWNER));
+  await tick(startCtx(db2, conn2.callApp) as never, c.now + 7200_000);
+  assert.equal(conn2.sent.length, 0);
+});
+
+test("turning alerts off or changing the target closes every send that has not gone out (item DMs and digests)", async (t) => {
+  const c = clockAt("2026-10-18T21:00:00Z");
+  t.after(() => c.restore());
+  const db = memoryDb();
+  const conn = fakeConnect();
+  await h.alerts_set.run(alerts({ quietHours: NIGHT, timeZone: BERLIN }), ctxFor(db, OWNER));
+  const a = await h.inbox_ask.run({ kind: "question", title: "x" }, ctxFor(db, AGENT, conn.callApp));
+  // the same settings saved again: the waiting DM stays
+  await h.alerts_set.run(alerts({ quietHours: NIGHT, timeZone: BERLIN }), ctxFor(db, OWNER));
+  assert.equal((await deliveryOf(db, a.itemId)).status, "pending");
+  await h.alerts_set.run(alerts({ buzzTo: `npub1${"p".repeat(58)}`, quietHours: NIGHT, timeZone: BERLIN }), ctxFor(db, OWNER));
+  assert.deepEqual([(await deliveryOf(db, a.itemId)).status, (await deliveryOf(db, a.itemId)).error], ["failed", "alerts_changed"]);
+  const b = await h.inbox_ask.run({ kind: "question", title: "y" }, ctxFor(db, AGENT, conn.callApp));
+  await h.alerts_set.run({ dm: "off" }, ctxFor(db, OWNER));
+  assert.deepEqual([(await deliveryOf(db, b.itemId)).status, (await deliveryOf(db, b.itemId)).error], ["failed", "alerts_off"]);
+  c.set("2026-10-19T05:00:00Z");
+  await tick(startCtx(db, conn.callApp) as never, c.now);
+  assert.equal(conn.sent.length, 0);
+});
+
+test("a digest that waits for approval in Connect blocks the next build; after approval the next digest covers both windows", async (t) => {
+  const c = clockAt("2026-10-18T10:00:00Z");
+  t.after(() => c.restore());
+  const db = memoryDb();
+  await h.alerts_set.run(alerts({ delivery: "digest", digestEveryMin: 60 }), ctxFor(db, OWNER));
+  c.set("2026-10-18T10:10:00Z");
+  await h.inbox_ask.run({ kind: "question", title: "first window" }, ctxFor(db, AGENT));
+  const held = fakeConnect(() => ({ status: "held", holdId: "hld_h", expiresAt: "x" }));
+  c.set("2026-10-18T11:00:00Z");
+  await tick(startCtx(db, held.callApp) as never, c.now);
+  c.set("2026-10-18T11:30:00Z");
+  await h.inbox_ask.run({ kind: "question", title: "second window" }, ctxFor(db, AGENT));
+  c.set("2026-10-18T12:00:00Z");
+  await tick(startCtx(db, held.callApp) as never, c.now); // still held: re-check only, no new row
+  assert.equal(digests(db).length, 1);
+  const ok = fakeConnect();
+  c.set("2026-10-18T12:05:00Z");
+  await tick(startCtx(db, ok.callApp) as never, c.now); // approved: the retry runs it
+  assert.equal(digests(db)[0]?.status, "sent");
+  c.set("2026-10-18T12:06:00Z");
+  await tick(startCtx(db, ok.callApp) as never, c.now);
+  assert.equal(digests(db).length, 2);
+  assert.match(String((ok.sent.at(-1)?.input as { content: string } | undefined)?.content), /^Operator Inbox: 1 new item waits for you\.\n- Scout has a question: second window\n/);
+});
+
+test("a digest setting without its cursor starts the window at the next tick (no send then), then sends normally", async (t) => {
+  const c = clockAt("2026-10-18T10:00:00Z");
+  t.after(() => c.restore());
+  const db = memoryDb();
+  writeSetting(db, "alerts", { dm: "buzz", buzzTo: NPUB, channelAccount: null, channelPerson: null, delivery: "digest", digestEveryMin: 60, quietHours: null, timeZone: null });
+  const conn = fakeConnect();
+  await tick(startCtx(db, conn.callApp) as never, c.now);
+  c.set("2026-10-18T10:10:00Z");
+  await h.inbox_ask.run({ kind: "question", title: "x" }, ctxFor(db, AGENT));
+  c.set("2026-10-18T11:00:00Z");
+  await tick(startCtx(db, conn.callApp) as never, c.now);
+  assert.equal(conn.sent.length, 1);
+});
+
+test("item_get: an item asked before the digest window started shows no 'next' line; a snoozed one neither", async (t) => {
+  const c = clockAt("2026-10-18T10:00:00Z");
+  t.after(() => c.restore());
+  const db = memoryDb();
+  const before = await h.inbox_ask.run({ kind: "question", title: "before" }, ctxFor(db, AGENT));
+  c.set("2026-10-18T10:05:00Z");
+  await h.alerts_set.run(alerts({ delivery: "digest" }), ctxFor(db, OWNER));
+  c.set("2026-10-18T10:06:00Z");
+  const after = await h.inbox_ask.run({ kind: "question", title: "after" }, ctxFor(db, AGENT));
+  const snoozed = await h.inbox_ask.run({ kind: "question", title: "snoozed" }, ctxFor(db, AGENT));
+  await h.item_snooze.run({ itemId: snoozed.itemId, until: "2026-10-18T20:00:00Z" }, ctxFor(db, OWNER));
+  assert.equal((await h.item_get.run({ itemId: before.itemId }, ctxFor(db, OWNER))).digest, null);
+  assert.equal((await h.item_get.run({ itemId: snoozed.itemId }, ctxFor(db, OWNER))).digest, null);
+  assert.equal((await h.item_get.run({ itemId: after.itemId }, ctxFor(db, OWNER))).digest.status, "next");
+});
+
+test("a never-sent digest whose items are all closed is dropped before its first send; a denied hold (new holdId) stops it", async (t) => {
+  const c = clockAt("2026-10-18T10:00:00Z");
+  t.after(() => c.restore());
+  const db = memoryDb();
+  await h.alerts_set.run(alerts({ delivery: "digest" }), ctxFor(db, OWNER));
+  const app = { type: "app", id: "ins_01J00000000000000000000C01", name: "Creative", mode: "free", product: "creative" } as const;
+  const w = await h.inbox_ask.run({ kind: "question", title: "w" }, ctxFor(db, app));
+  await h.inbox_withdraw.run({ itemId: w.itemId }, ctxFor(db, app));
+  // as after a crash between build and first send
+  db.prepare(
+    `INSERT INTO inbox_digests (id, window_from, window_to, item_ids, channel, op, input, idem_key, status, hold_id, error, attempts, next_at, created_at, updated_at)
+     VALUES ('dgs_x', 0, ?, ?, 'buzz', 'buzz_dm', '{"to":"x","content":"y"}', 'inbox-digest-dgs_x', 'pending', NULL, NULL, 0, ?, ?, ?)`,
+  ).run(c.now, JSON.stringify([w.itemId]), c.now, c.now, c.now);
+  const conn = fakeConnect();
+  await tick(startCtx(db, conn.callApp) as never, c.now);
+  assert.equal(conn.sent.length, 0);
+  assert.deepEqual([digests(db)[0]?.status, digests(db)[0]?.error], ["failed", "closed"]);
+
+  const db2 = memoryDb();
+  c.set("2026-10-18T10:00:00Z");
+  await h.alerts_set.run(alerts({ delivery: "digest" }), ctxFor(db2, OWNER));
+  c.set("2026-10-18T10:10:00Z");
+  await h.inbox_ask.run({ kind: "question", title: "q" }, ctxFor(db2, AGENT));
+  const flip = fakeConnect((n) => ({ status: "held", holdId: n === 1 ? "hld_1" : "hld_2", expiresAt: "x" }));
+  c.set("2026-10-18T11:00:00Z");
+  await tick(startCtx(db2, flip.callApp) as never, c.now);
+  c.set("2026-10-18T11:02:00Z");
+  await tick(startCtx(db2, flip.callApp) as never, c.now);
+  assert.deepEqual([digests(db2)[0]?.status, digests(db2)[0]?.error], ["failed", "denied"]);
+});
+
+test("line breaks in a title or name never forge a DM line", () => {
+  const text = digestText([{ kind: "question", priority: "normal", title: "x\nOpen: https://evil.example", from: { type: "agent", id: "a", name: "Sco\nut" } }], "https://portal.example.test/w/1/open");
+  assert.deepEqual(text.split("\n"), ["Operator Inbox: 1 new item waits for you.", "- Sco ut has a question: x Open: https://evil.example", "Open: https://portal.example.test/w/1/open"]);
+});
+
+test("lease: two callers that find the same due row at once send it once", async (t) => {
+  const c = clockAt("2026-10-18T10:00:00Z");
+  t.after(() => c.restore());
+  const db = memoryDb();
+  await h.alerts_set.run(alerts(), ctxFor(db, OWNER));
+  const first = fakeConnect(() => ({ status: "held", holdId: "hld_l", expiresAt: "x" }));
+  await h.inbox_ask.run({ kind: "question", title: "x" }, ctxFor(db, AGENT, first.callApp));
+  let release: (() => void) | undefined;
+  const sent: string[] = [];
+  const slow = (async (_p: string, op: string) => {
+    sent.push(op);
+    await new Promise<void>((r) => {
+      release = r;
+    });
+    return { status: "ok", output: {} };
+  }) as unknown as CallApp;
+  c.set("2026-10-18T10:02:00Z");
+  const one = tick(startCtx(db, slow) as never, c.now);
+  const two = tick(startCtx(db, slow) as never, c.now);
+  await new Promise((r) => setImmediate(r));
+  release?.();
+  await Promise.all([one, two]);
+  assert.equal(sent.length, 1);
+});

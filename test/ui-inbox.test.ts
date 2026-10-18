@@ -150,7 +150,10 @@ const pick = async (host: Element, label: string, option: string) => {
   const trigger = [...host.querySelectorAll('[role="combobox"]')].find((t) => t.closest(".tb-field")?.querySelector(".tb-label")?.textContent === label);
   assert.ok(trigger, `select "${label}"`);
   await click(trigger);
-  const opt = [...host.querySelectorAll('[role="option"]')].find((o) => o.textContent?.includes(option));
+  // only the list this trigger opened (another select may offer the same label)
+  const list = host.querySelector(`[id="${trigger.getAttribute("aria-controls")}"]`);
+  assert.ok(list, `list of "${label}"`);
+  const opt = [...list.querySelectorAll('[role="option"]')].find((o) => o.textContent?.includes(option));
   assert.ok(opt, `option "${option}"`);
   await click(opt);
   await flush();
@@ -384,6 +387,18 @@ describe("Settings: digest and quiet hours (C263)", () => {
     const sent = stub.calls.filter((c) => c.op === "alerts_set");
     assert.equal(sent.length, 1);
     assert.deepEqual([sent[0]?.input.quietHours, sent[0]?.input.timeZone], [{ start: "22:00", end: "07:00" }, Intl.DateTimeFormat().resolvedOptions().timeZone]);
+    await m.unmount();
+  });
+
+  it("quiet hours On then Off: the suggested zone is not stored", async () => {
+    reset();
+    const m = await mount(h(pages.SettingsPage, {}));
+    await pick(m.host, "Quiet hours", "On, every day");
+    await pick(m.host, "Quiet hours", "Off");
+    await click(button(m.host, "Save"));
+    await flush();
+    const sent = stub.calls.filter((c) => c.op === "alerts_set");
+    assert.deepEqual([sent[0]?.input.quietHours, sent[0]?.input.timeZone], [null, null]);
     await m.unmount();
   });
 
