@@ -271,7 +271,7 @@ test("alerts: off by default (no companion call); settings validate and clear th
   await assert.rejects(h.alerts_set.run({ dm: "buzz", buzzTo: "not-a-key", channelAccount: null, channelPerson: null }, ctxFor(db, OWNER)), code("alerts_invalid"));
   await assert.rejects(h.alerts_set.run({ dm: "channel", buzzTo: null, channelAccount: "acc_1", channelPerson: null }, ctxFor(db, OWNER)), code("alerts_invalid"));
   const set = await h.alerts_set.run({ dm: "buzz", buzzTo: NPUB, channelAccount: "acc_1", channelPerson: "@me" }, ctxFor(db, OWNER));
-  assert.deepEqual(set, { dm: "buzz", buzzTo: NPUB, channelAccount: null, channelPerson: null });
+  assert.deepEqual(set, { dm: "buzz", buzzTo: NPUB, channelAccount: null, channelPerson: null, delivery: "each", digestEveryMin: 60, quietHours: null, timeZone: null }, "an older caller without the I2 fields gets their defaults");
 });
 
 test("alerts: a Buzz DM goes out through Connect with an idempotency key; the ask never fails because of it", async () => {

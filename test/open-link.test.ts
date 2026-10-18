@@ -74,6 +74,7 @@ test("R5 upgrade: a 0.3.0 database takes migration 0003; old rows load with no l
      VALUES ('itm_old', 'question', 'Old', NULL, '["answer","clarify"]', 'app', ?, 'Observer', 'observer', 'open', 'normal', 1, NULL, NULL, 1, 1, ?)`,
   ).run(OBSERVER.id, Date.now() + 86_400_000);
   migrate(db, 3);
+  migrate(db, 4);
   const got = await h.item_get.run({ itemId: "itm_old" }, ctxFor(db, OWNER));
   assert.equal(got.open, null);
   assert.equal(got.title, "Old");
