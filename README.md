@@ -30,6 +30,7 @@ This repository is public. It must never contain secrets or personal data, and n
 - Fail closed: a second answer (`already_decided`), an answer on text the owner has not read (`stale_version`), an answer after expiry (`item_expired`), a response the item does not allow (`response_not_allowed`), answer or clarify without words (`message_required`), an answer on a closed item (`item_closed`). A caller with too many open items gets `too_many_open_items` (429).
 - Holds overview: Inbox's own open items plus, with the owner's consent at deploy (wildcard companion `product: "*"` for `tb.holds_pending` only), the pending holds of all apps (summaries only, never inputs or views). Each row opens the owning app's decision page through Portal (`/w/<ws>/open`, launch ticket). Deciding stays in the owning app.
 - Alerts: open, unsnoozed, unexpired items count in the TBD badge (`pendingCount` + `statusChanged`). Optional owner DM through Connect (Buzz or a channel account), off by default; Connect sends it from the workspace sender identity the owner picks (`no_sender_identity` until set). A held DM is repeated with the same input and key; a denied one stops. The alert carries the title only, never the context.
+- Digest and quiet hours (C263): `alerts_set` takes `delivery` (`each`, default: one DM per item; `digest`: one DM per window of 1, 3, 12 or 24 h with the count, up to 10 titles, `+N more` and the Inbox link, never the context), `quietHours {start, end}` (HH:MM, may cross midnight; null = off, the default) and `timeZone` (IANA name; required with quiet hours; the Settings page suggests the browser zone, stored only on Save). Only `dm` is required. In quiet hours no alert DM is sent: a new item's DM waits until the window ends ("waits for your quiet hours to end"), and a digest due then goes out at the end. A digest names the items that are still open, unsnoozed and not withdrawn when it is built; its text is frozen then, so a held send repeats with the same input and key, and a later withdraw does not cancel it. `item_get.digest` says whether the item waits for the next digest or how its digest went.
 - Deep links: `/items/<id>` opens one item, `/holds/<id>` one of Inbox's own holds.
 
 ## Language
@@ -43,11 +44,12 @@ New code is TypeScript (Node 24+). Swift only where the macOS app requires it.
 | `tealbrick.manifest.json` | identity, runtime (data + backup volumes), operations, companions, skills, backups, UI paths |
 | `src/app.ts` | `defineApp`: one typed handler per operation (op ids and I/O types from `#kit`) |
 | `src/store.ts` | the decision loop: items, messages (the thread), decisions (who and when), snooze, priority, ack; every fail-closed rule |
-| `src/alerts.ts` | optional owner alert DM through Connect (companion call; off by default; held sends repeated with the same input and key) |
+| `src/alerts.ts` | optional owner alert DM through Connect (companion call; off by default; held sends repeated with the same input and key); digest and quiet hours (C263) |
+| `src/quiet.ts` | quiet-hours math in the owner's time zone (Intl; midnight and DST safe) |
 | `src/holds.ts` | holds overview: Inbox items + all apps' pending holds (`tb.holds_pending` via `ctx.companionTargets()`, owner consent), Portal links |
 | `src/main.ts` | `startApp(app, process.env)` |
 | `src/ui/` | React UI (`<TbProvider>` + `<AppShell>` from `@opt2-tealbrick/ui`; `standard.tsx` + `pages.css` are the template copies, `app.css` is this app's layout), built to `dist/ui` |
-| `migrations/` | `0001_init.sql` (baseline) `0002_withdraw.sql` (raising product, withdraw columns, item history) and `0003_open_path.sql` (the raising app's page for `inbox_ask open`); forward-only, never edit a released file |
+| `migrations/` | `0001_init.sql` (baseline) `0002_withdraw.sql` (raising product, withdraw columns, item history) `0003_open_path.sql` (the raising app's page for `inbox_ask open`) and `0004_digests.sql` (the alert digest); forward-only, never edit a released file |
 | `skills/use-inbox/SKILL.md` | the agent skill (frontmatter `name`, `description`) |
 | `scripts/build-ui.ts` | UI build without a bundler (tsc output + vendored modules + import map) |
 | `gen/` (not committed) | `tb-gen` output; `node --run kit` generates the kit and compiles it to `dist/kit` (`#kit` import) |

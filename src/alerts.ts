@@ -23,8 +23,8 @@ export interface Alerts {
   quietHours: QuietHours | null;
   timeZone: string | null;
 }
-/** What alerts_set takes: the I2 fields are optional (an older caller keeps their defaults). */
-export type AlertsInput = Pick<Alerts, "dm" | "buzzTo" | "channelAccount" | "channelPerson"> & Partial<Pick<Alerts, "delivery" | "digestEveryMin" | "quietHours" | "timeZone">>;
+/** What alerts_set takes: only `dm` is required (QA LOW on 0.3.0); left-out fields take their defaults. */
+export type AlertsInput = Pick<Alerts, "dm"> & Partial<Omit<Alerts, "dm">>;
 
 export const ALERTS_OFF: Alerts = { dm: "off", buzzTo: null, channelAccount: null, channelPerson: null, delivery: "each", digestEveryMin: 60, quietHours: null, timeZone: null };
 const KEY = "alerts";

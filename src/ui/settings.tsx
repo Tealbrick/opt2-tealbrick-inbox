@@ -1,10 +1,27 @@
-// Settings: the optional owner alert DM (op alerts_get / alerts_set). Off by default.
+// Settings: the optional owner alert DM (op alerts_get / alerts_set). Off by default. C263: one DM per item or a
+// digest, and quiet hours in the owner's time zone (the browser zone is only a suggestion until the owner saves).
 import type { Json } from "@opt2-tealbrick/miniapp-sdk";
 import { callOp } from "@opt2-tealbrick/miniapp-sdk/client";
 import { Button, Field, Notice, Section, Select, TextInput } from "@opt2-tealbrick/ui";
 import { useEffect, useRef, useState } from "react";
 import type { AlertsGetOutput } from "#kit";
 import { errText, Head, LoadError, Loading, useOp } from "./shared.tsx";
+
+/** The browser's zone, offered as a suggestion only (C263 D1); null when the runtime cannot say. */
+function browserZone(): string | null {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || null;
+  } catch {
+    return null;
+  }
+}
+
+const EVERY = [
+  { value: "60", label: "Every hour" },
+  { value: "180", label: "Every 3 hours" },
+  { value: "720", label: "Every 12 hours" },
+  { value: "1440", label: "Once a day" },
+];
 
 export function SettingsPage() {
   const { data, error, reload } = useOp<AlertsGetOutput>("alerts_get", {});
@@ -69,6 +86,53 @@ export function SettingsPage() {
                 <Field label="Your handle in that channel">
                   <TextInput value={form.channelPerson ?? ""} onChange={(e) => set({ channelPerson: e.target.value })} />
                 </Field>
+              </>
+            ) : null}
+            {form.dm !== "off" ? (
+              <>
+                <Field label="Send">
+                  <Select
+                    value={form.delivery}
+                    onValueChange={(delivery) => set({ delivery: delivery as AlertsGetOutput["delivery"] })}
+                    options={[
+                      { value: "each", label: "One message per new item" },
+                      { value: "digest", label: "A digest", meta: "one message with the count and the titles" },
+                    ]}
+                  />
+                </Field>
+                {form.delivery === "digest" ? (
+                  <Field label="Digest">
+                    <Select value={String(form.digestEveryMin)} onValueChange={(v) => set({ digestEveryMin: Number(v) as AlertsGetOutput["digestEveryMin"] })} options={EVERY} />
+                  </Field>
+                ) : null}
+                <Field label="Quiet hours" hint="No message in this time; it goes out when quiet hours end.">
+                  <Select
+                    value={form.quietHours ? "on" : "off"}
+                    onValueChange={(v) =>
+                      // the browser zone fills the field as a suggestion; nothing is stored before Save
+                      set(v === "on" ? { quietHours: form.quietHours ?? { start: "22:00", end: "07:00" }, timeZone: form.timeZone ?? browserZone() } : { quietHours: null })
+                    }
+                    options={[
+                      { value: "off", label: "Off" },
+                      { value: "on", label: "On, every day" },
+                    ]}
+                  />
+                </Field>
+                {form.quietHours ? (
+                  <>
+                    <div className="tb-row">
+                      <Field label="From">
+                        <TextInput type="time" value={form.quietHours.start} onChange={(e) => form.quietHours && set({ quietHours: { ...form.quietHours, start: e.target.value } })} />
+                      </Field>
+                      <Field label="Until">
+                        <TextInput type="time" value={form.quietHours.end} onChange={(e) => form.quietHours && set({ quietHours: { ...form.quietHours, end: e.target.value } })} />
+                      </Field>
+                    </div>
+                    <Field label="Your time zone" hint="A name such as Europe/Berlin. Check it before you save.">
+                      <TextInput value={form.timeZone ?? ""} onChange={(e) => set({ timeZone: e.target.value || null })} />
+                    </Field>
+                  </>
+                ) : null}
               </>
             ) : null}
           </div>

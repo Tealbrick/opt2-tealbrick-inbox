@@ -180,7 +180,7 @@ test("digest: one DM per window with the count, the titles and the Inbox link; n
   c.set("2026-10-18T11:00:00Z");
   await tick(startCtx(db, conn.callApp) as never, c.now);
   assert.equal(conn.sent.length, 1);
-  const text = String((conn.sent[0]?.input as { content: string }).content);
+  const text = String((conn.sent[0]?.input as { content: string } | undefined)?.content);
   assert.equal(
     text,
     `Operator Inbox: 2 new items wait for you.\n- Scout asks for your approval (urgent): Ship v2?\n- Scout has a question: Which region?\nOpen: ${PORTAL}/w/${WS}/open?product=inbox&path=%2F`,
@@ -212,7 +212,7 @@ test("digest: only items still open count; withdrawn, answered and snoozed ones 
   for (let i = 1; i <= DIGEST_TITLES + 2; i++) await h.inbox_ask.run({ kind: "question", title: `q${i}` }, ctxFor(db, AGENT));
   c.set("2026-10-18T11:00:00Z");
   await tick(startCtx(db, conn.callApp) as never, c.now);
-  const text = String((conn.sent[0]?.input as { content: string }).content);
+  const text = String((conn.sent[0]?.input as { content: string } | undefined)?.content);
   assert.match(text, new RegExp(`^Operator Inbox: ${DIGEST_TITLES + 2} new items wait for you\\.`));
   assert.ok(!/withdrawn one|answered one|snoozed one/.test(text));
   assert.match(text, /\n\+2 more\n/);
@@ -228,7 +228,7 @@ test("digest: a held digest repeats with the same input and key; first contact s
   c.set("2026-10-18T10:30:00Z");
   const one = await h.inbox_ask.run({ kind: "question", title: "one" }, ctxFor(db, app));
   await h.inbox_ask.run({ kind: "question", title: "two" }, ctxFor(db, AGENT));
-  const conn = fakeConnect((n) => (n === 1 ? Object.assign(new Error("first"), { code: "buzz_first_contact_required" }) : n === 2 ? { status: "held", holdId: "hld_d", expiresAt: "x" } : { status: "ok", output: {} }));
+  const conn = fakeConnect((n): Json | Error => (n === 1 ? Object.assign(new Error("first"), { code: "buzz_first_contact_required" }) : n === 2 ? { status: "held", holdId: "hld_d", expiresAt: "x" } : { status: "ok", output: {} }));
   c.set("2026-10-18T11:00:00Z");
   await tick(startCtx(db, conn.callApp) as never, c.now);
   assert.deepEqual(
@@ -261,7 +261,7 @@ test("digest: a window that ends in quiet hours is sent when they end; turning t
   c.set("2026-10-19T05:00:00Z");
   await tick(startCtx(db, conn.callApp) as never, c.now);
   assert.equal(conn.sent.length, 1);
-  const text = String((conn.sent[0]?.input as { content: string }).content);
+  const text = String((conn.sent[0]?.input as { content: string } | undefined)?.content);
   assert.match(text, /^Operator Inbox: 1 new item waits for you\.\n- Scout has a question: after the switch\n/);
 });
 

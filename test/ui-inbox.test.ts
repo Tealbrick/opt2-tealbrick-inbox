@@ -55,6 +55,7 @@ const item = (over: Record<string, unknown> = {}) => ({
   withdrawal: null,
   activity: [],
   open: null,
+  digest: null,
   ...over,
 });
 const overview = {
@@ -82,7 +83,7 @@ const reset = (answers: Record<string, unknown> = {}) => {
   stub.fail = {};
   stub.gate = {};
   stub.networkDown = false;
-  stub.answers = { item_get: item(), holds_overview: overview, alerts_get: { dm: "buzz", buzzTo: "npub1abc", channelAccount: null, channelPerson: null }, alerts_set: { dm: "buzz", buzzTo: "npub1abc", channelAccount: null, channelPerson: null }, item_decide: {}, item_ack: item(), item_priority: item(), item_snooze: item(), ...answers };
+  stub.answers = { item_get: item(), holds_overview: overview, alerts_get: { dm: "buzz", buzzTo: "npub1abc", channelAccount: null, channelPerson: null, delivery: "each", digestEveryMin: 60, quietHours: null, timeZone: null }, alerts_set: { dm: "buzz", buzzTo: "npub1abc", channelAccount: null, channelPerson: null, delivery: "each", digestEveryMin: 60, quietHours: null, timeZone: null }, item_decide: {}, item_ack: item(), item_priority: item(), item_snooze: item(), ...answers };
 };
 
 globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -366,6 +367,58 @@ describe("All approvals", () => {
     await flush();
     assert.equal(m.host.querySelectorAll(".item").length, 3);
     await m.unmount();
+  });
+});
+
+describe("Settings: digest and quiet hours (C263)", () => {
+  it("quiet hours On pre-fills the browser zone as a suggestion; nothing is sent before Save; Save sends the window and the zone", async () => {
+    reset();
+    const m = await mount(h(pages.SettingsPage, {}));
+    await pick(m.host, "Quiet hours", "On, every day");
+    const zone = [...m.host.querySelectorAll(".tb-field")].find((x) => x.querySelector(".tb-label")?.textContent === "Your time zone")?.querySelector("input") as HTMLInputElement | null;
+    assert.ok(zone, `the time zone field is shown: ${[...m.host.querySelectorAll(".tb-label")].map((l) => l.textContent).join("|")}`);
+    assert.equal(zone.value, Intl.DateTimeFormat().resolvedOptions().timeZone, "the browser zone is the suggestion");
+    assert.equal(stub.calls.filter((c) => c.op === "alerts_set").length, 0, "a suggestion is not saved");
+    await click(button(m.host, "Save"));
+    await flush();
+    const sent = stub.calls.filter((c) => c.op === "alerts_set");
+    assert.equal(sent.length, 1);
+    assert.deepEqual([sent[0]?.input.quietHours, sent[0]?.input.timeZone], [{ start: "22:00", end: "07:00" }, Intl.DateTimeFormat().resolvedOptions().timeZone]);
+    await m.unmount();
+  });
+
+  it("a digest shows the window choice and saves delivery digest with the chosen window; dm Off hides all of it", async () => {
+    reset();
+    const m = await mount(h(pages.SettingsPage, {}));
+    assert.ok(![...m.host.querySelectorAll(".tb-label")].some((l) => l.textContent === "Digest"), "no window choice for one DM per item");
+    await pick(m.host, "Send", "A digest");
+    await pick(m.host, "Digest", "Every 3 hours");
+    await click(button(m.host, "Save"));
+    await flush();
+    const sent = stub.calls.filter((c) => c.op === "alerts_set");
+    assert.deepEqual([sent[0]?.input.delivery, sent[0]?.input.digestEveryMin], ["digest", 180]);
+    await pick(m.host, "Direct message", "Off");
+    assert.ok(![...m.host.querySelectorAll(".tb-label")].some((l) => l.textContent === "Send" || l.textContent === "Quiet hours"));
+    await m.unmount();
+  });
+});
+
+describe("Item alert line (C263)", () => {
+  const line = async (digest: unknown, deliveries: unknown[] = []) => {
+    reset({ items_list: { items: [], nextCursor: null, counts: { pending: 0, snoozed: 0 } }, item_get: item({ digest, deliveries }) });
+    const m = await mount(inbox());
+    const text = [...m.host.querySelectorAll(".detail .tb-hint")].map((p) => p.textContent ?? "").filter((t) => t.startsWith("Alert:"));
+    await m.unmount();
+    return text;
+  };
+  it("names the digest state; a delivery waiting for quiet hours says so; no line without either", async () => {
+    assert.match((await line({ status: "next", at: later, error: null }))[0] ?? "", /^Alert: in the next digest \(about /);
+    assert.match((await line({ status: "sent", at: now, error: null }))[0] ?? "", /^Alert: sent in the digest /);
+    assert.equal((await line({ status: "held", at: now, error: null }))[0], "Alert: the digest waits for your approval in Connect");
+    assert.equal((await line({ status: "failed", at: now, error: "no_grant" }))[0], "Alert: the digest failed (Connect is not in this workspace)");
+    const quiet = await line(null, [{ id: "dlv_1", channel: "buzz", status: "pending", holdId: null, error: "quiet_hours", attempts: 0, updatedAt: now }]);
+    assert.equal(quiet[0], "Alert: Buzz DM pending (waits for your quiet hours to end)");
+    assert.deepEqual(await line(null), []);
   });
 });
 
