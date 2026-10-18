@@ -1708,10 +1708,7 @@
         "type": "object",
         "additionalProperties": false,
         "required": [
-          "dm",
-          "buzzTo",
-          "channelAccount",
-          "channelPerson"
+          "dm"
         ],
         "properties": {
           "dm": {
