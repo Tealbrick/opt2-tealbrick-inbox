@@ -47,6 +47,13 @@ None. No keys and no environment variables.
 - **External:** None directly. Everything goes through the Connect companion call.
 - **Background:** A 60 s tick: expiry sweep (calls `statusChanged` for the badge) and retry of pending or held alert sends (up to 60 attempts, 1 minute apart). Lazy expiry on every op as well.
 
+## Rollback and reinstall (inbox_withdraw)
+
+- Do not roll back to 0.2.9 once migration 0002 has run: 0002 has no down migration and 0.2.9 does not know its columns and table. Restore the pre-update snapshot (SDK upgrade safety) instead.
+- A reinstalled app gets a new instance id. An app that raised items before its reinstall cannot withdraw them afterwards (the raiser match is on the recorded instance id and product); those items stay open until the owner answers them or they expire. Agents are matched on their agent id and keep their rights.
+- The item history in `item_get` shows every withdraw row and the refused attempts folded per caller and cause (a count, the newest time), at most 50 lines. A refused attempt on an id that does not exist is counted against a separate hourly cap from attempts on a real item, so junk ids cannot hide a probe.
+- A send that is in flight while an item is withdrawn cannot be recalled; its result never overwrites the withdrawn delivery, and no new send is attempted for a withdrawn item.
+
 ## Person UI
 
 Inbox (badge), All approvals, Holds, Agents and scopes, Settings (alerts). Deep links `/items/<id>`, `/holds/<id>` (`src/ui/App.tsx`).
