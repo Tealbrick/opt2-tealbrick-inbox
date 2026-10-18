@@ -186,7 +186,7 @@ export function ask(db: Db, from: From & { product?: string | null }, input: Ask
     from.type,
     from.id,
     from.name,
-    from.type === "app" ? (from.product ?? null) : null,
+    from.type === "app" && from.product ? from.product : null,
     input.priority ?? "normal",
     now,
     now,
@@ -203,7 +203,10 @@ export type Caller = Pick<Actor, "type" | "id" | "product">;
  * also the same verified product when the item recorded one. A recorded product never matches a caller without that
  * verified product (fail closed). Items without a recorded product (raised before migration 0002, or through a bridge
  * that did not sign the product yet, C243) match on type and instance id, as before; the instance id comes from the
- * verified grant too. inbox_withdraw is stricter (raisedBy): it needs a recorded product for an app.
+ * verified grant too, so only an instance id collision could cross products there. A caller that arrives WITHOUT a
+ * product (e.g. through an older bridge) reads `unknown` on an item that recorded one: it should retry or ask again, never
+ * treat `unknown` as a refusal. inbox_withdraw is stricter (raisedBy): it needs a recorded product for an app.
+ * Refused status/reply calls leave no history row (read path, no write); only inbox_withdraw records refused attempts.
  */
 function ownedBy(r: Row, c: Caller): boolean {
   if (c.type === "person" || r.from_type !== c.type || r.from_id !== c.id) return false;
@@ -306,7 +309,10 @@ function raisedBy(r: Row, a: Actor): boolean {
 
 /** Writes the audit row of a refused attempt, throttled; the throttle only skips the row, it never changes the answer. */
 export function recordRefusal(db: Db, a: Actor, itemId: string, code: RefusalCode, now: number): void {
-  const junk = code === "unknown_item";
+  // a refused call on an id that does not exist is junk whatever the cause, so it never uses the budget (or the cap)
+  // that keeps the trace of a probe of a real item
+  const cause: RefusalCode = code !== "unknown_item" && !row(db, itemId) ? "unknown_item" : code;
+  const junk = cause === "unknown_item";
   const recent = Number(
     db
       .prepare(`SELECT COUNT(*) AS n FROM inbox_activity WHERE actor_id = ? AND kind = 'withdraw_refused' AND created_at > ? AND (detail = 'unknown_item') = ?`)
@@ -322,7 +328,7 @@ export function recordRefusal(db: Db, a: Actor, itemId: string, code: RefusalCod
     a.id,
     a.product,
     a.name,
-    code,
+    cause,
     now,
   );
 }

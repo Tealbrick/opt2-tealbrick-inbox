@@ -118,3 +118,59 @@ test("S4-4 bad case: many actors over the caps → only the newest rows per clas
   assert.ok(Array.isArray(store.get(db, id, NOW).activity));
   assert.equal(store.pruneActivity(db, NOW), 0, "a second prune changes nothing");
 });
+
+test("S4-7 pinned: a row without a recorded product (empty or NULL) answers its instance id whatever the caller's product; only an instance id collision could cross products", () => {
+  const db = memoryDb();
+  const ins = db.prepare(
+    `INSERT INTO inbox_items (id, kind, title, context, responses, from_type, from_id, from_name, from_product, status, priority, version, acked_at, snoozed_until, created_at, updated_at, expires_at)
+     VALUES (?, 'question', 'No product', NULL, '["answer","clarify"]', 'app', ?, 'Creative', ?, 'open', 'normal', 1, NULL, NULL, ?, ?, ?)`,
+  );
+  ins.run("itm_empty", CREATIVE.id, "", NOW, NOW, NOW + 86_400_000);
+  ins.run("itm_null", CREATIVE.id, null, NOW, NOW, NOW + 86_400_000);
+  for (const id of ["itm_empty", "itm_null"]) {
+    assert.equal(store.status(db, { type: "app", id: CREATIVE.id, product: "kanban" }, id).status, "open", id);
+    assert.equal(store.status(db, { type: "app", id: CREATIVE_2.id, product: "creative" }, id).status, "unknown", id);
+  }
+});
+
+test("S4-7: an app that asks with an empty product records none (the store keeps its own invariant)", () => {
+  const db = memoryDb();
+  const item = store.ask(db, { type: "app", id: CREATIVE.id, name: "Creative", product: "" }, { kind: "question", title: "x" }, NOW);
+  assert.equal(db.prepare("SELECT from_product FROM inbox_items WHERE id = ?").get(item.id)?.from_product, null);
+});
+
+test("S4-4 boundaries: exactly at each cap nothing goes; one over the cap removes exactly the oldest row of that class", () => {
+  const db = memoryDb();
+  refused(db, store.REFUSAL_CAP_UNKNOWN, "unknown_item", NOW - 50_000, "ins_j");
+  refused(db, store.REFUSAL_CAP, "not_raiser", NOW - 50_000, "ins_r");
+  assert.equal(store.pruneActivity(db, NOW), 0);
+  refused(db, 1, "unknown_item", NOW - 1, "ins_j2");
+  refused(db, 1, "not_raiser", NOW - 1, "ins_r2");
+  assert.equal(store.pruneActivity(db, NOW), 2);
+  assert.equal(count(db, "id = 'act_unknown_item_ins_j_000000'"), 0, "the oldest junk row went");
+  assert.equal(count(db, "id = 'act_not_raiser_ins_r_000000'"), 0, "the oldest real row went");
+  assert.equal(count(db, "actor_id IN ('ins_j2', 'ins_r2')"), 2, "the newest rows stay");
+});
+
+test("S4-4: age and cap together — old rows go first, then the cap counts only the young rows", () => {
+  const db = memoryDb();
+  refused(db, 100, "not_raiser", NOW - store.REFUSAL_KEEP_MS - 1000, "ins_old");
+  refused(db, store.REFUSAL_CAP, "not_raiser", NOW - 50_000, "ins_young");
+  assert.equal(store.pruneActivity(db, NOW), 100);
+  assert.equal(count(db, "actor_id = 'ins_young'"), store.REFUSAL_CAP);
+});
+
+test("S4-4: a no-product app refused on made-up ids is recorded as junk, so it cannot push out probes of real items", async () => {
+  const db = memoryDb();
+  const id = await appItem(db);
+  await assert.rejects(h.inbox_withdraw.run({ itemId: "itm_made_up" }, ctxFor(db, NO_PRODUCT)));
+  await assert.rejects(h.inbox_withdraw.run({ itemId: id }, ctxFor(db, NO_PRODUCT)));
+  const rows = db.prepare("SELECT item_id, detail FROM inbox_activity ORDER BY item_id").all();
+  assert.deepEqual(
+    rows.map((r) => [r.item_id, r.detail]),
+    [
+      [id, "no_product"],
+      ["itm_made_up", "unknown_item"],
+    ].sort((a, b) => (String(a[0]) < String(b[0]) ? -1 : 1)),
+  );
+});

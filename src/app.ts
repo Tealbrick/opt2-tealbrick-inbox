@@ -67,7 +67,12 @@ export const TICK_MS = 60_000;
 export async function tick(ctx: Pick<StartContext, "db" | "log" | "callApp" | "statusChanged">, now = clock.now()): Promise<void> {
   try {
     if (store.expireDue(ctx.db, now) > 0) ctx.statusChanged();
-    store.pruneActivity(ctx.db, now);
+    try {
+      store.pruneActivity(ctx.db, now);
+    } catch (e) {
+      // a prune problem must never stop the alert retries of this tick
+      ctx.log.warn("inbox activity prune failed", { error: e instanceof Error ? e.message : "unknown" });
+    }
     await retryDue(ctx.db, ctx.callApp, now);
   } catch (e) {
     ctx.log.warn("inbox tick failed", { error: e instanceof Error ? e.message : "unknown" });
