@@ -93,6 +93,34 @@ export function retire(db: Db, tokenId: string, now: number): void {
   db.prepare("UPDATE inbox_dm_tokens SET used_at = ?, used_by = 'retired' WHERE id = ? AND used_at IS NULL").run(now, tokenId);
 }
 
+/** QA-INBOX17-1: buttons turned off (or sent to someone else now): every token not used yet stops working for good. */
+export function retireAll(db: Db, now: number): number {
+  return Number(db.prepare("UPDATE inbox_dm_tokens SET used_at = ?, used_by = 'retired' WHERE used_at IS NULL").run(now).changes);
+}
+
+/**
+ * QA-INBOX17-2: the alert row keeps a button value WITHOUT its signature (`ib1.<tid>.<c>`); the signature is computed again
+ * from the key and the token row right before each send. HMAC is deterministic, so every send of one alert carries the
+ * same input (same idempotency key, same input), and the database never holds a usable button value.
+ */
+export function unsigned(value: string): string {
+  return value.slice(0, value.lastIndexOf("."));
+}
+
+/** The signed values for the stored (unsigned) ones; throws when the key or the token row is gone (send text only then). */
+export async function seal(db: Db, secrets: Secrets, tokenId: string, stored: readonly string[]): Promise<string[]> {
+  const k = await secrets.get(KEY_NAME);
+  // a token used by a click still signs (a repeat of the same send must carry the same input); a retired one never does
+  const r = db.prepare("SELECT * FROM inbox_dm_tokens WHERE id = ? AND (used_by IS NULL OR used_by <> 'retired')").get(tokenId);
+  if (!k || !r) throw new TbError("token_unavailable", "The button token is gone.", 409);
+  const to: Recipient = { account: String(r.account), person: String(r.person) };
+  return stored.map((v) => {
+    const m = /^ib1\.([A-Za-z0-9_-]{16})\.([ad])$/.exec(v);
+    if (!m || m[1] !== tokenId) throw new TbError("token_unavailable", "The stored button does not match its token.", 409);
+    return `${v}.${mac(Buffer.from(k, "base64url"), tokenId, m[2] as string, String(r.item_id), Number(r.item_version), to, Number(r.expires_at))}`;
+  });
+}
+
 export interface Click {
   /** the button value Connect relays */
   token: string;
@@ -150,6 +178,7 @@ export async function check(db: Db, secrets: Secrets, current: Recipient | null,
   const service = SERVICES.has(named) ? named : null;
   if (click.account !== minted.account || click.clicker.id !== minted.person || (service !== null && click.clicker.service !== service))
     throw new TbError("wrong_person", "Only the person this alert went to can decide here.", 403);
+  if (r.used_by === "retired") throw new TbError("buttons_off", "These buttons no longer work. Open Operator Inbox to decide.", 409);
   if (r.used_at !== null && r.used_at !== undefined) throw new TbError("token_used", "This was already decided from the chat.", 409);
   if (Number(r.expires_at) <= now) throw new TbError("token_expired", "This button expired. Open Operator Inbox to decide.", 409);
   return { tokenId: tid, itemId: String(r.item_id), version: Number(r.item_version), response: CHOICE[c] as Response, by: `${click.clicker.service}:${click.clicker.id}` };

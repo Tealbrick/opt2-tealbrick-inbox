@@ -5,7 +5,7 @@ import type { Json, TbError } from "@opt2-tealbrick/miniapp-sdk";
 import { BUTTONS_LINE, INBOX_ONLY_LINE } from "../src/alerts.ts";
 import { clock, handlers, tick } from "../src/app.ts";
 import { MAX_BAD_MACS, TOKEN_TTL_MS } from "../src/dm.ts";
-import { AGENT, type CallApp, ctxFor, memoryDb, OWNER, type Sent } from "./helpers.ts";
+import { AGENT, type CallApp, ctxFor, memoryDb, OWNER, type Sent, secretsFor } from "./helpers.ts";
 
 const h = handlers as any;
 const code = (c: string) => (e: unknown) => (e as TbError).code === c;
@@ -177,7 +177,7 @@ test("older Connect refuses `actions`: the alert goes out as text only and the t
   assert.equal(c.sent[1]?.key, `${c.sent[0]?.key}-plain`);
   const d = (await h.item_get.run({ itemId: out.itemId }, ctxFor(db, OWNER))).deliveries;
   assert.equal(d[0].status, "sent");
-  await assert.rejects(click(db, first.actions?.[0]?.value as string), code("token_used"), "retired token");
+  await assert.rejects(click(db, first.actions?.[0]?.value as string), code("buttons_off"), "retired token");
 });
 
 test("Teams / Discord: Connect answers actions unsupported → the token is retired", async () => {
@@ -185,7 +185,7 @@ test("Teams / Discord: Connect answers actions unsupported → the token is reti
   const c = fakeConnect(() => ({ status: "ok", output: { messageId: "1", conversation: "c1", actions: "unsupported" } }));
   await h.inbox_ask.run({ kind: "approval", title: "Post?", family: "none" }, ctxFor(db, AGENT, c.callApp));
   const value = (inp(c.sent[0]).actions ?? [])[0]?.value as string;
-  await assert.rejects(click(db, value, { account: "teams", clicker: { service: "teams", id: OWNER_ID } }), code("token_used"));
+  await assert.rejects(click(db, value, { account: "teams", clicker: { service: "teams", id: OWNER_ID } }), code("buttons_off"));
 });
 
 test("snooze end pushes the status at once (C331(11)), from the tick and from the wake timer", async () => {
@@ -235,4 +235,117 @@ test("brute force (C334): wrong signatures on one token id are logged and lock t
   // the real button is dead now; the item waits in Inbox
   await assert.rejects(click(db, approve), code("token_locked"));
   assert.equal((await h.inbox_status.run({ itemId }, ctxFor(db, AGENT))).status, "open");
+});
+
+test("QA-INBOX17-1: buttons off → on, or a new recipient, never revives buttons sent before", async () => {
+  const db = await setup();
+  const a = await ask(db);
+  await h.alerts_set.run({ dm: "channel", channelAccount: "slack", channelPerson: OWNER_ID, buttons: false }, ctxFor(db, OWNER));
+  await h.alerts_set.run({ dm: "channel", channelAccount: "slack", channelPerson: OWNER_ID, buttons: true }, ctxFor(db, OWNER));
+  await assert.rejects(click(db, a.actions[0]?.value as string), code("buttons_off"));
+  // a new alert after buttons went on again works
+  const b = await ask(db);
+  // a recipient change also retires (then changing back does not revive)
+  await h.alerts_set.run({ dm: "channel", channelAccount: "slack", channelPerson: "U0SOMEONE", buttons: true }, ctxFor(db, OWNER));
+  await h.alerts_set.run({ dm: "channel", channelAccount: "slack", channelPerson: OWNER_ID, buttons: true }, ctxFor(db, OWNER));
+  await assert.rejects(click(db, b.actions[0]?.value as string), code("buttons_off"));
+  // saving the same setting again keeps the buttons
+  const c = await ask(db);
+  await h.alerts_set.run({ dm: "channel", channelAccount: "slack", channelPerson: OWNER_ID, buttons: true }, ctxFor(db, OWNER));
+  assert.equal((await click(db, c.actions[0]?.value as string)).response, "approve");
+});
+
+test("QA-INBOX17-2: the alert row stores no usable button value; each send signs the same values again", async () => {
+  const db = await setup();
+  const c = fakeConnect((n): Json => (n === 1 ? { status: "held", holdId: "hld_1", expiresAt: "2026-10-24T11:00:00Z" } : { status: "ok", output: { messageId: "1", conversation: "D1", actions: "shown" } }));
+  const out = await h.inbox_ask.run({ kind: "approval", title: "Post?", family: "none" }, ctxFor(db, AGENT, c.callApp));
+  const stored = JSON.parse(String(db.prepare("SELECT input FROM inbox_deliveries").get()?.input)) as { actions: Action[] };
+  for (const a of stored.actions) assert.match(a.value, /^ib1\.[A-Za-z0-9_-]{16}\.[ad]$/, "no signature at rest");
+  const sent = inp(c.sent[0]).actions ?? [];
+  for (const a of sent) assert.match(a.value, /^ib1\.[A-Za-z0-9_-]{16}\.[ad]\.[A-Za-z0-9_-]{22}$/, "signed on the wire");
+  // the held send repeats with the same key and the SAME input
+  await tick({ db, log: { debug() {}, info() {}, warn() {}, error() {} }, callApp: c.callApp, statusChanged() {}, secrets: secretsFor(db) } as never, NOW + 61_000);
+  assert.equal(c.sent.length, 2);
+  assert.deepEqual(c.sent[1]?.input, c.sent[0]?.input);
+  assert.equal(c.sent[1]?.key, c.sent[0]?.key);
+  assert.equal((await click(db, sent[0]?.value as string)).itemId, out.itemId);
+});
+
+test("QA-INBOX17-3: Connect refuses late buttons (actions_invalid) or reports them expired: text only, token retired", async () => {
+  const db = await setup();
+  const c = fakeConnect((n) => (n === 1 ? Object.assign(new Error("actionsUntil passed"), { code: "actions_invalid" }) : { status: "ok", output: { messageId: "1", conversation: "D1" } }));
+  await h.inbox_ask.run({ kind: "approval", title: "Post?", family: "none" }, ctxFor(db, AGENT, c.callApp));
+  assert.equal(c.sent.length, 2);
+  assert.equal(inp(c.sent[1]).actions, undefined);
+  assert.match(inp(c.sent[1]).text, /Open Operator Inbox to answer\.$/);
+  await assert.rejects(click(db, (inp(c.sent[0]).actions ?? [])[0]?.value as string), code("buttons_off"));
+
+  const e = fakeConnect(() => ({ status: "ok", output: { messageId: "2", conversation: "D1", actions: "expired" } }));
+  await h.inbox_ask.run({ kind: "approval", title: "Late", family: "none" }, ctxFor(db, AGENT, e.callApp));
+  await assert.rejects(click(db, (inp(e.sent[0]).actions ?? [])[0]?.value as string), code("buttons_off"));
+});
+
+test("a retry without the key (no secrets) sends the alert as text only", async () => {
+  const db = await setup();
+  const c = fakeConnect((n): Json => (n === 1 ? { status: "held", holdId: "hld_1", expiresAt: "2026-10-24T11:00:00Z" } : { status: "ok", output: { messageId: "1", conversation: "D1" } }));
+  await h.inbox_ask.run({ kind: "approval", title: "Post?", family: "none" }, ctxFor(db, AGENT, c.callApp));
+  await tick({ db, log: { debug() {}, info() {}, warn() {}, error() {} }, callApp: c.callApp, statusChanged() {} } as never, NOW + 61_000);
+  assert.equal(inp(c.sent[1]).actions, undefined);
+  assert.equal(c.sent[1]?.key, `${c.sent[0]?.key}-plain`);
+});
+
+// ── QA-INBOX17-4: mutation guards ──
+
+test("mutation guard: a token used between the check and the decide is refused (consume is guarded and its result is used)", async () => {
+  const db = await setup();
+  const { itemId, actions } = await ask(db);
+  // a second click wins the race right after this click's check read the token row
+  const racing = new Proxy(db, {
+    get(target, prop, receiver) {
+      if (prop !== "prepare") return Reflect.get(target, prop, receiver);
+      return (sql: string) => {
+        const st = target.prepare(sql);
+        if (!sql.startsWith("SELECT * FROM inbox_dm_tokens WHERE id = ?")) return st;
+        return {
+          get: (...args: unknown[]) => {
+            const row = (st.get as (...a: unknown[]) => unknown)(...args);
+            target.prepare("UPDATE inbox_dm_tokens SET used_at = 1, used_by = 'slack:U0OTHERCLICK'").run();
+            return row;
+          },
+        };
+      };
+    },
+  });
+  const ctx = { ...ctxFor(racing as never, CONNECT), secrets: secretsFor(db) };
+  await assert.rejects(h.item_decide_dm.run({ token: actions[0]?.value, clicker: { service: "slack", id: OWNER_ID }, account: "slack" }, ctx), code("token_used"));
+  assert.equal((await h.inbox_status.run({ itemId }, ctxFor(db, AGENT))).status, "open", "no decision without the token");
+});
+
+test("mutation guard: the family is checked again at click time", async () => {
+  const db = await setup();
+  const { itemId, actions } = await ask(db);
+  db.prepare("UPDATE inbox_items SET family = 'money' WHERE id = ?").run(itemId);
+  await assert.rejects(click(db, actions[0]?.value as string), code("decide_in_inbox"));
+  db.prepare("UPDATE inbox_items SET family = NULL WHERE id = ?").run(itemId);
+  await assert.rejects(click(db, actions[0]?.value as string), code("decide_in_inbox"));
+});
+
+test("mutation guard: a button lives 24 hours (literal), not longer", async () => {
+  const db = await setup();
+  const { actions, sent } = await ask(db, { kind: "approval", title: "Week", family: "none", expiresInS: 7 * 24 * 3600 });
+  assert.equal(inp(sent).actionsUntil, new Date(NOW + 86_400_000).toISOString());
+  clock.now = () => NOW + 86_400_000;
+  await assert.rejects(click(db, actions[0]?.value as string), code("token_expired"));
+  clock.now = () => NOW + 86_399_000;
+  assert.equal((await click(db, actions[0]?.value as string)).response, "approve");
+  clock.now = () => NOW;
+});
+
+test("mutation guard: the lock comes at the fifth wrong signature (literal), not the sixth", async () => {
+  const db = await setup();
+  const { actions } = await ask(db);
+  const [, tid] = String(actions[0]?.value).split(".") as [string, string];
+  const guess = (n: number) => click(db, `ib1.${tid}.a.${String(n).padStart(22, "y")}`);
+  for (const n of [1, 2, 3, 4]) await assert.rejects(guess(n), code("token_invalid"));
+  await assert.rejects(guess(5), code("token_locked"));
 });
