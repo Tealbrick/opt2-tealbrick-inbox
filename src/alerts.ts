@@ -7,8 +7,10 @@
 // one per item, and quiet hours in the owner's time zone hold every alert until the window ends.
 import { ulid } from "@opt2-tealbrick/manifest";
 import type { Db, Json, OpContext } from "@opt2-tealbrick/miniapp-sdk";
+import { buttonChoices, mint, type Recipient, retire, type Secrets } from "./dm.ts";
 import { inQuiet, type QuietHours, quietEnd, validHhmm, validTimeZone } from "./quiet.ts";
-import { type ItemSummary, readSetting, writeSetting } from "./store.ts";
+import type { Family, ItemSummary, Kind, Response } from "./store.ts";
+import { readSetting, writeSetting } from "./store.ts";
 
 export const DIGEST_EVERY_MIN = [60, 180, 720, 1440] as const;
 export type DigestEveryMin = (typeof DIGEST_EVERY_MIN)[number];
@@ -22,11 +24,13 @@ export interface Alerts {
   digestEveryMin: DigestEveryMin;
   quietHours: QuietHours | null;
   timeZone: string | null;
+  /** IN-2: Approve / Deny buttons in the channel DM (off by default; only with dm = channel and one DM per item) */
+  buttons: boolean;
 }
 /** What alerts_set takes: only `dm` is required (QA LOW on 0.3.0); left-out fields take their defaults. */
 export type AlertsInput = Pick<Alerts, "dm"> & Partial<Omit<Alerts, "dm">>;
 
-export const ALERTS_OFF: Alerts = { dm: "off", buzzTo: null, channelAccount: null, channelPerson: null, delivery: "each", digestEveryMin: 60, quietHours: null, timeZone: null };
+export const ALERTS_OFF: Alerts = { dm: "off", buzzTo: null, channelAccount: null, channelPerson: null, delivery: "each", digestEveryMin: 60, quietHours: null, timeZone: null, buttons: false };
 const KEY = "alerts";
 /** The end of the last digest window (ms); set when digest delivery is turned on, moved by every digest build. */
 const DIGEST_CURSOR = "alerts_digest_cursor";
@@ -69,7 +73,14 @@ export function readAlerts(db: Db): Alerts {
     // quiet hours without a usable zone are no quiet hours (the writer never stores that)
     quietHours: quietHours && timeZone ? quietHours : null,
     timeZone,
+    // a setting stored before IN-2 has no `buttons`: off
+    buttons: s.dm === "channel" && s.buttons === true,
   };
+}
+
+/** The recipient chat buttons are bound to now, or null when buttons are off (every outstanding token then stops working). */
+export function buttonRecipient(a: Alerts): Recipient | null {
+  return a.dm === "channel" && a.buttons && a.channelAccount && a.channelPerson ? { account: a.channelAccount, person: a.channelPerson } : null;
 }
 
 /** Validates and stores the setting. Fields of the other channel are cleared, so nothing stale lingers. */
@@ -92,12 +103,12 @@ export function writeAlerts(db: Db, input: AlertsInput, now = Date.now()): Alert
     if (input.dm === "buzz") {
       const to = blank(input.buzzTo);
       if (!to || !NPUB.test(to)) throw new AlertsError("buzzTo must be your Buzz key (npub1… or 64 hex characters).");
-      next = { dm: "buzz", buzzTo: to, channelAccount: null, channelPerson: null, ...common };
+      next = { dm: "buzz", buzzTo: to, channelAccount: null, channelPerson: null, ...common, buttons: false };
     } else {
       const account = blank(input.channelAccount);
       const person = blank(input.channelPerson);
       if (!account || !person) throw new AlertsError("A channel DM needs the Connect channel account and your handle in it.");
-      next = { dm: "channel", buzzTo: null, channelAccount: account, channelPerson: person, ...common };
+      next = { dm: "channel", buzzTo: null, channelAccount: account, channelPerson: person, ...common, buttons: input.buttons === true };
     }
   }
   db.transaction(() => {
@@ -138,7 +149,16 @@ export class AlertsError extends Error {
 
 /** The text the owner receives. Title only (the agent wrote it for the owner); never the context. */
 export function alertText(item: ItemSummary): string {
-  return `${lineOf(item)}\nOpen Operator Inbox to answer.`;
+  return `${lineOf(item)}\n${OPEN_LINE}`;
+}
+
+const OPEN_LINE = "Open Operator Inbox to answer.";
+export const BUTTONS_LINE = "Tap Approve or Deny below, or open Operator Inbox to answer.";
+export const INBOX_ONLY_LINE = "Decide this in Operator Inbox (Portal, Tealbrick desktop or mobile).";
+
+/** The alert text with its last line for the DM: buttons, Inbox only (buttons on, but this item gets none), or the plain line. */
+function textWith(item: ItemSummary, line: string): string {
+  return `${lineOf(item)}\n${line}`;
 }
 
 /** One line per item: line breaks in the caller's name or title are collapsed, so they can never forge a line of the DM. */
@@ -169,22 +189,73 @@ function companionInput(a: Alerts, text: string): { channel: "buzz" | "channel";
 type Send = OpContext["callApp"];
 type Table = "inbox_deliveries" | "inbox_digests";
 
+const LABEL: Partial<Record<Response, { label: string; style: "primary" | "danger" }>> = {
+  approve: { label: "Approve", style: "primary" },
+  deny: { label: "Deny", style: "danger" },
+};
+
 /**
  * Records a delivery for a new item (when alerts are on, one DM per item) and makes the first attempt. In quiet hours
- * the first attempt waits until the window ends (error `quiet_hours` until then). In digest mode no per-item row is made.
+ * the first attempt waits until the window ends (error `quiet_hours` until then). In digest mode no per-item row is made
+ * (a digest names many items and never carries buttons). With `secrets` and chat buttons on, an item that may be decided
+ * from the chat (dm.ts buttonChoices) gets signed Approve / Deny buttons (IN-2).
  */
-export async function alertNewItem(db: Db, callApp: Send, item: ItemSummary, now: number): Promise<void> {
+export async function alertNewItem(db: Db, callApp: Send, item: ItemSummary, now: number, secrets?: Secrets): Promise<void> {
   const a = readAlerts(db);
   if (a.delivery === "digest") return;
-  const target = companionInput(a, alertText(item));
+  const to = buttonRecipient(a);
+  let text = alertText(item);
+  let actions: { tokenId: string; input: Json } | null = null;
+  if (to) {
+    const r = db.prepare("SELECT family, responses FROM inbox_items WHERE id = ?").get(item.id);
+    const family = (r?.family ?? null) as Family | null;
+    const choices = buttonChoices(item.kind as Kind, family, r ? (JSON.parse(String(r.responses)) as Response[]) : []);
+    if (choices.length > 0 && secrets) {
+      const m = await mint(db, secrets, { id: item.id, version: item.version, expiresAt: Date.parse(item.expiresAt) }, to, choices, now);
+      text = textWith(item, BUTTONS_LINE);
+      actions = {
+        tokenId: m.tokenId,
+        input: {
+          actions: m.buttons.map((b) => ({ label: LABEL[b.response]?.label ?? b.response, value: b.value, style: LABEL[b.response]?.style ?? "primary" })),
+          actionsUntil: new Date(m.expiresAt).toISOString(),
+        },
+      };
+    } else if (choices.length === 0) text = textWith(item, INBOX_ONLY_LINE);
+  }
+  const target = companionInput(a, text);
   if (!target) return;
+  const input = actions ? { ...(target.input as Record<string, Json>), ...(actions.input as Record<string, Json>) } : target.input;
   const id = `dlv_${ulid(now)}`;
   const quiet = inQuiet(a.quietHours, a.timeZone, now);
   db.prepare(
-    `INSERT INTO inbox_deliveries (id, item_id, channel, op, input, idem_key, status, hold_id, error, attempts, next_at, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'pending', NULL, ?, 0, ?, ?, ?)`,
-  ).run(id, item.id, target.channel, target.op, JSON.stringify(target.input), `inbox-alert-${id}`, quiet ? "quiet_hours" : null, quiet ? quietEnd(a.quietHours, a.timeZone, now) : now, now, now);
+    `INSERT INTO inbox_deliveries (id, item_id, channel, op, input, idem_key, status, hold_id, error, attempts, next_at, created_at, updated_at, token_id)
+     VALUES (?, ?, ?, ?, ?, ?, 'pending', NULL, ?, 0, ?, ?, ?, ?)`,
+  ).run(
+    id,
+    item.id,
+    target.channel,
+    target.op,
+    JSON.stringify(input),
+    `inbox-alert-${id}`,
+    quiet ? "quiet_hours" : null,
+    quiet ? quietEnd(a.quietHours, a.timeZone, now) : now,
+    now,
+    now,
+    actions?.tokenId ?? null,
+  );
   if (!quiet) await attempt(db, callApp, "inbox_deliveries", id, now);
+}
+
+/** Connect before IN-2 refuses the unknown `actions` field: send the same alert as text only (new key; the token is retired). */
+function toPlain(db: Db, id: string, input: Record<string, Json>, tokenId: string, now: number): void {
+  const { actions: _a, actionsUntil: _u, ...rest } = input;
+  const text = String(rest.text ?? "").replace(BUTTONS_LINE, OPEN_LINE);
+  db.prepare("UPDATE inbox_deliveries SET input = ?, idem_key = idem_key || '-plain', token_id = NULL, updated_at = ? WHERE id = ? AND status IN ('pending', 'held')").run(
+    JSON.stringify({ ...rest, text }),
+    now,
+    id,
+  );
+  retire(db, tokenId, now);
 }
 
 /**
@@ -350,7 +421,8 @@ async function attempt(db: Db, callApp: Send, table: Table, id: string, now: num
       return;
     }
   }
-  const d = db.prepare(`SELECT op, input, idem_key, attempts, hold_id FROM ${table} WHERE id = ? AND status IN ('pending', 'held')`).get(id);
+  const tokenCol = table === "inbox_deliveries" ? ", token_id" : ", NULL AS token_id";
+  const d = db.prepare(`SELECT op, input, idem_key, attempts, hold_id${tokenCol} FROM ${table} WHERE id = ? AND status IN ('pending', 'held')`).get(id);
   if (!d) return;
   const attempts = Number(d.attempts) + 1;
   // The send is awaited, so a withdraw can close this delivery meanwhile (status failed, error withdrawn). Every write here
@@ -375,9 +447,18 @@ async function attempt(db: Db, callApp: Send, table: Table, id: string, now: num
     // without running (denied or expired): stop, so a refused alert never turns into a stream of new holds.
     else if (r.status === "held" && d.hold_id && r.holdId !== d.hold_id) set("failed", null, "denied");
     else if (r.status === "held") set("held", r.holdId, null);
-    else set("sent", null, null);
+    else {
+      set("sent", null, null);
+      // Teams / Discord: Connect sent text only; the buttons never reached the owner
+      if (d.token_id && (r.output as { actions?: unknown } | null)?.actions === "unsupported") retire(db, String(d.token_id), now);
+    }
   } catch (e) {
     const code = errorCode(e);
+    if (code === "input_invalid" && d.token_id) {
+      clearTimeout(timer);
+      toPlain(db, id, JSON.parse(String(d.input)) as Record<string, Json>, String(d.token_id), now);
+      return attempt(db, callApp, table, id, now, true);
+    }
     const first = FIRST_CONTACT[code];
     if (first && String(d.op) !== first) {
       // Connect: the owner's address was never written to from the workspace sender. Switch to the first-contact op

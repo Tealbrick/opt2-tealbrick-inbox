@@ -237,6 +237,12 @@ describe("inbox_withdraw through the real SDK", () => {
     assert.equal((await call("inbox_ask", { kind: "question", title: "same", open: { path: "/sources" } }, asApp(CREATIVE_1, "creative"), k)).status, 409);
   });
 
+  it("QA LOW (0.3.0): alerts_set passes the SDK schema with only dm (+ the chosen channel's fields)", async () => {
+    const npub = `npub1${"q".repeat(58)}`;
+    assert.deepEqual(await person("alerts_set", { dm: "buzz", buzzTo: npub }), { dm: "buzz", buzzTo: npub, channelAccount: null, channelPerson: null, delivery: "each", digestEveryMin: 60, quietHours: null, timeZone: null, buttons: false });
+    assert.equal((await person("alerts_set", { dm: "off" })).dm, "off");
+  });
+
   it("the SDK checks the input: a missing itemId or an unknown field is refused before the handler", async () => {
     const who = asApp(CREATIVE_1, "creative");
     assert.equal((await call("inbox_withdraw", {}, who, key())).status, 400);

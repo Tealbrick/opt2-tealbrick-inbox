@@ -63,6 +63,7 @@ test("S4-7 upgrade: an app item from 0.2.9 (no recorded product) still answers i
   migrate(db, 2);
   migrate(db, 3);
   migrate(db, 4);
+  migrate(db, 5);
   assert.equal(store.status(db, { type: "app", id: CREATIVE.id, product: "creative" }, "itm_old_app").status, "open");
   assert.equal(store.status(db, { type: "app", id: CREATIVE.id, product: null }, "itm_old_app").status, "open", "the instance id is verified too");
   assert.equal(store.status(db, { type: "app", id: CREATIVE_2.id, product: "creative" }, "itm_old_app").status, "unknown");

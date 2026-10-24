@@ -138,6 +138,18 @@
               }
             },
             "description": "Only for an app caller with a verified product: a page of that app the owner can open from the item. An agent caller, an app without a verified product, or a path the launch rule refuses is refused (the whole call)."
+          },
+          "family": {
+            "type": "string",
+            "enum": [
+              "destructive",
+              "money",
+              "first_contact",
+              "identity",
+              "public_link",
+              "none"
+            ],
+            "description": "The hold family of what the owner approves: destructive (delete), money, first_contact, identity, public_link, or none. Only an approval with a declared family other than destructive or money can get Approve / Deny buttons in the owner's chat DM; leave it out and the owner decides in Operator Inbox only."
           }
         }
       },
@@ -612,6 +624,7 @@
           "updatedAt",
           "expiresAt",
           "context",
+          "family",
           "responses",
           "messages",
           "decision",
@@ -719,6 +732,21 @@
             "type": [
               "string",
               "null"
+            ]
+          },
+          "family": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "destructive",
+              "money",
+              "first_contact",
+              "identity",
+              "public_link",
+              "none",
+              null
             ]
           },
           "responses": {
@@ -1098,6 +1126,105 @@
       "idempotency": "supported",
       "receipt": false,
       "audience": "person"
+    },
+    {
+      "id": "item_decide_dm",
+      "title": "Decide from a chat button",
+      "description": "Connect relays a click on an Approve / Deny button of the owner's Slack or Telegram DM alert. Only Connect can call it. The button value is signed and single-use, and works only for its item and item version, the alert's recipient, and before it expires; anything else is refused and changes nothing.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "token",
+          "clicker",
+          "account"
+        ],
+        "properties": {
+          "token": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "description": "The button value as Inbox minted it."
+          },
+          "clicker": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "service",
+              "id"
+            ],
+            "properties": {
+              "service": {
+                "type": "string",
+                "enum": [
+                  "slack",
+                  "teams",
+                  "telegram",
+                  "discord"
+                ]
+              },
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              }
+            },
+            "description": "The person who clicked, as the chat service reported it to Connect."
+          },
+          "account": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "description": "The account input of the send that carried the buttons (Connect's record of that message)."
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "itemId",
+          "status",
+          "response",
+          "decidedAt",
+          "decidedBy"
+        ],
+        "properties": {
+          "itemId": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "open",
+              "answered",
+              "expired"
+            ]
+          },
+          "response": {
+            "type": "string",
+            "enum": [
+              "approve",
+              "deny",
+              "answer",
+              "clarify"
+            ]
+          },
+          "decidedAt": {
+            "type": "string"
+          },
+          "decidedBy": {
+            "type": "string"
+          }
+        }
+      },
+      "crud": [
+        "update"
+      ],
+      "effect": "write",
+      "idempotency": "supported",
+      "receipt": true,
+      "audience": "agent"
     },
     {
       "id": "item_snooze",
@@ -1699,7 +1826,8 @@
           "delivery",
           "digestEveryMin",
           "quietHours",
-          "timeZone"
+          "timeZone",
+          "buttons"
         ],
         "properties": {
           "dm": {
@@ -1780,6 +1908,9 @@
             ],
             "maxLength": 64,
             "description": "IANA time zone of the owner (e.g. Europe/Berlin). Required when quietHours is set."
+          },
+          "buttons": {
+            "type": "boolean"
           }
         }
       },
@@ -1799,10 +1930,7 @@
         "type": "object",
         "additionalProperties": false,
         "required": [
-          "dm",
-          "buzzTo",
-          "channelAccount",
-          "channelPerson"
+          "dm"
         ],
         "properties": {
           "dm": {
@@ -1883,6 +2011,10 @@
             ],
             "maxLength": 64,
             "description": "IANA time zone of the owner (e.g. Europe/Berlin). Required when quietHours is set."
+          },
+          "buttons": {
+            "type": "boolean",
+            "description": "Approve / Deny buttons in the channel DM (Slack, Telegram) for approvals that may be decided from the chat. Off by default; only with dm = channel."
           }
         }
       },
@@ -1897,7 +2029,8 @@
           "delivery",
           "digestEveryMin",
           "quietHours",
-          "timeZone"
+          "timeZone",
+          "buttons"
         ],
         "properties": {
           "dm": {
@@ -1978,6 +2111,9 @@
             ],
             "maxLength": 64,
             "description": "IANA time zone of the owner (e.g. Europe/Berlin). Required when quietHours is set."
+          },
+          "buttons": {
+            "type": "boolean"
           }
         }
       },

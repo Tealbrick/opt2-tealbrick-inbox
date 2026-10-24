@@ -2,7 +2,7 @@
 // digest, and quiet hours in the owner's time zone (the browser zone is only a suggestion until the owner saves).
 import type { Json } from "@opt2-tealbrick/miniapp-sdk";
 import { callOp } from "@opt2-tealbrick/miniapp-sdk/client";
-import { Button, Field, Notice, Section, Select, TextInput } from "@opt2-tealbrick/ui";
+import { Button, Field, Notice, Section, Select, Switch, TextInput } from "@opt2-tealbrick/ui";
 import { useEffect, useRef, useState } from "react";
 import type { AlertsGetOutput } from "#kit";
 import { errText, Head, LoadError, Loading, useOp } from "./shared.tsx";
@@ -86,6 +86,11 @@ export function SettingsPage() {
                 <Field label="Your handle in that channel">
                   <TextInput value={form.channelPerson ?? ""} onChange={(e) => set({ channelPerson: e.target.value })} />
                 </Field>
+                <Switch label="Answer approvals from the chat (Approve and Deny buttons)" checked={form.buttons} onCheckedChange={(buttons) => set({ buttons })} />
+                <p className="tb-hint measure">
+                  Only you can use the buttons, once, for 24 hours at most. Approvals that spend money or delete data, and approvals without a declared kind, never get
+                  buttons: you decide them here. A digest never has buttons (it names many items). Turning this off stops every button that was already sent.
+                </p>
               </>
             ) : null}
             {form.dm !== "off" ? (

@@ -38,7 +38,7 @@ test("manifest validates; agent ops and person ops are the brief's set", () => {
       .filter((o) => o.audience === aud)
       .map((o) => o.id)
       .sort();
-  assert.deepEqual(by("agent"), ["inbox_ask", "inbox_reply", "inbox_status", "inbox_withdraw"]);
+  assert.deepEqual(by("agent"), ["inbox_ask", "inbox_reply", "inbox_status", "inbox_withdraw", "item_decide_dm"]);
   assert.deepEqual(by("person"), ["alerts_get", "alerts_set", "holds_overview", "item_ack", "item_decide", "item_get", "item_priority", "item_snooze", "items_list"]);
   const ask = manifest.operations.find((o) => o.id === "inbox_ask");
   assert.equal(ask?.idempotency, "required", "inbox_ask needs an idempotency key");
@@ -270,8 +270,12 @@ test("alerts: off by default (no companion call); settings validate and clear th
   assert.equal(sent.length, 0);
   await assert.rejects(h.alerts_set.run({ dm: "buzz", buzzTo: "not-a-key", channelAccount: null, channelPerson: null }, ctxFor(db, OWNER)), code("alerts_invalid"));
   await assert.rejects(h.alerts_set.run({ dm: "channel", buzzTo: null, channelAccount: "acc_1", channelPerson: null }, ctxFor(db, OWNER)), code("alerts_invalid"));
+  // QA LOW (0.3.0): only dm is required; the other channel's fields may be left out
+  assert.deepEqual(await h.alerts_set.run({ dm: "buzz", buzzTo: NPUB }, ctxFor(db, OWNER)), { dm: "buzz", buzzTo: NPUB, channelAccount: null, channelPerson: null, delivery: "each", digestEveryMin: 60, quietHours: null, timeZone: null, buttons: false });
+  assert.deepEqual(await h.alerts_set.run({ dm: "off" }, ctxFor(db, OWNER)), ALERTS_OFF);
+  await assert.rejects(h.alerts_set.run({ dm: "channel", channelAccount: "acc_1" }, ctxFor(db, OWNER)), code("alerts_invalid"));
   const set = await h.alerts_set.run({ dm: "buzz", buzzTo: NPUB, channelAccount: "acc_1", channelPerson: "@me" }, ctxFor(db, OWNER));
-  assert.deepEqual(set, { dm: "buzz", buzzTo: NPUB, channelAccount: null, channelPerson: null, delivery: "each", digestEveryMin: 60, quietHours: null, timeZone: null }, "an older caller without the I2 fields gets their defaults");
+  assert.deepEqual(set, { dm: "buzz", buzzTo: NPUB, channelAccount: null, channelPerson: null, delivery: "each", digestEveryMin: 60, quietHours: null, timeZone: null, buttons: false }, "an older caller without the I2 fields gets their defaults");
 });
 
 test("alerts: a Buzz DM goes out through Connect with an idempotency key; the ask never fails because of it", async () => {

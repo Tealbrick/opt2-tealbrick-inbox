@@ -1,7 +1,7 @@
 -- G6 I2 (C263): the alert DIGEST. One row per digest DM: the items it names are frozen at build time, and so is its
 -- input, so a held or timed-out send repeats with the same input and idempotency key (like inbox_deliveries).
 -- Not an inbox_deliveries row on purpose: withdrawing one item must never cancel the digest of the others.
--- Forward-only; 0001-0003 are never edited.
+-- Forward-only; 0001-0004 are never edited. (Renumbered from 0004 to 0005 before release: IN-2 took 0004.)
 CREATE TABLE inbox_digests (
   id TEXT PRIMARY KEY,
   window_from INTEGER NOT NULL,

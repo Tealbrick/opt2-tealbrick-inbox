@@ -285,6 +285,7 @@ test("upgrade from a 0.2.9 database: old rows load, an old agent item can be wit
   migrate(db, 2);
   migrate(db, 3);
   migrate(db, 4);
+  migrate(db, 5);
 
   // the owner's view loads the old rows with the new fields at their neutral values
   const listed = store.list(db, "all", 50, 0, NOW);
