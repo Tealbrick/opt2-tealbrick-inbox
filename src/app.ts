@@ -28,6 +28,8 @@ import {
   type InboxWithdrawOutput,
   type ItemAckInput,
   type ItemAckOutput,
+  type ItemDecideDmInput,
+  type ItemDecideDmOutput,
   type ItemDecideInput,
   type ItemDecideOutput,
   type ItemGetInput,
@@ -41,7 +43,8 @@ import {
   OP,
   type OpId,
 } from "#kit";
-import { AlertsError, alertNewItem, readAlerts, retryDue, writeAlerts } from "./alerts.ts";
+import { AlertsError, alertNewItem, buttonRecipient, readAlerts, retryDue, writeAlerts } from "./alerts.ts";
+import * as dm from "./dm.ts";
 import { overview } from "./holds.ts";
 import * as store from "./store.ts";
 
@@ -56,18 +59,42 @@ function op<I, O>(spec: HandlerSpec<I, O>): HandlerSpec {
   return spec as unknown as HandlerSpec;
 }
 
-/** Every op starts with the lazy expiry sweep, so no handler ever reads an item past its time as open. */
+/** Every op starts with the lazy expiry and snooze sweeps, so no handler ever reads an item past its time as open. */
 function begin(ctx: OpContext): number {
   const now = clock.now();
-  if (store.expireDue(ctx.db, now) > 0) ctx.statusChanged();
+  if (store.expireDue(ctx.db, now) + store.wakeDue(ctx.db, now) > 0) ctx.statusChanged();
   return now;
 }
 
-/** Background tick (C85 app-initiated calls): expiry sweep (badge), due alert sends. */
+/** Background tick (C85 app-initiated calls): expiry and snooze sweeps (badge), due alert sends. */
 export const TICK_MS = 60_000;
-export async function tick(ctx: Pick<StartContext, "db" | "log" | "callApp" | "statusChanged">, now = clock.now()): Promise<void> {
+type TickCtx = Pick<StartContext, "db" | "log" | "callApp" | "statusChanged">;
+let wakeTimer: ReturnType<typeof setTimeout> | undefined;
+/**
+ * C331(11): a snooze that ends between two ticks pushes the status at its end, not at the next tick or periodic report.
+ * One timer at most, for the next snooze end inside the tick window.
+ */
+function armWake(ctx: TickCtx, now: number): void {
+  clearTimeout(wakeTimer);
+  wakeTimer = undefined;
+  const next = store.nextWake(ctx.db, now);
+  if (next === null || next - now >= TICK_MS) return;
+  wakeTimer = setTimeout(() => {
+    wakeTimer = undefined;
+    try {
+      const t = clock.now();
+      if (store.wakeDue(ctx.db, t) > 0) ctx.statusChanged();
+      armWake(ctx, t);
+    } catch (e) {
+      ctx.log.warn("inbox snooze wake failed", { error: e instanceof Error ? e.message : "unknown" });
+    }
+  }, next - now + 1);
+  wakeTimer.unref?.();
+}
+export async function tick(ctx: TickCtx, now = clock.now()): Promise<void> {
   try {
-    if (store.expireDue(ctx.db, now) > 0) ctx.statusChanged();
+    if (store.expireDue(ctx.db, now) + store.wakeDue(ctx.db, now) > 0) ctx.statusChanged();
+    armWake(ctx, now);
     try {
       store.pruneActivity(ctx.db, now);
     } catch (e) {
@@ -79,6 +106,9 @@ export async function tick(ctx: Pick<StartContext, "db" | "log" | "callApp" | "s
     ctx.log.warn("inbox tick failed", { error: e instanceof Error ? e.message : "unknown" });
   }
 }
+
+/** The one app that may relay a chat button (manifest companions of Connect, IN-2). */
+const CONNECT_PRODUCT = "connect";
 
 /** Owner ops: only a person session reaches them (SDK); this guards the handler too (C84: approver = owner only). */
 function owner(ctx: OpContext): string {
@@ -122,7 +152,7 @@ export const handlers = {
       const item = store.ask(ctx.db, actor, input, now);
       ctx.statusChanged();
       try {
-        await alertNewItem(ctx.db, ctx.callApp, item, now);
+        await alertNewItem(ctx.db, ctx.callApp, item, now, ctx.secrets);
       } catch (e) {
         ctx.log.warn("alert failed", { item: item.id, error: e instanceof Error ? e.message : "unknown" });
       }
@@ -191,11 +221,33 @@ export const handlers = {
       return out;
     },
   }),
+  [OP.itemDecideDm]: op<ItemDecideDmInput, ItemDecideDmOutput>({
+    redact: (input) => clip(`chat button by ${input.clicker.service}:${input.clicker.id}`, 280),
+    async run(input, ctx) {
+      // IN-2: only Connect relays a chat button, and only Inbox decides (PLAN-DM-DECIDE §3)
+      const c = ctx.caller;
+      if (c.type !== "app" || c.product !== CONNECT_PRODUCT) throw new TbError("connect_only", "Only Connect can relay a chat button.", 403);
+      const now = begin(ctx);
+      const click = await dm.check(ctx.db, ctx.secrets, buttonRecipient(readAlerts(ctx.db)), input, now);
+      const item = store.familyOf(ctx.db, click.itemId);
+      if (item === undefined || item.kind !== "approval" || item.family === null || store.INBOX_ONLY_FAMILIES.has(item.family))
+        throw new TbError("decide_in_inbox", "Decide this in Operator Inbox.", 403);
+      const out = ctx.db.transaction(() => {
+        if (!dm.consume(ctx.db, click.tokenId, click.by, now)) throw new TbError("token_used", "This was already decided from the chat.", 409);
+        return store.decide(ctx.db, { itemId: click.itemId, version: click.version, response: click.response }, click.by, now);
+      });
+      ctx.statusChanged();
+      ctx.receipt.meta({ via: input.clicker.service, response: out.response });
+      return { ...out, decidedBy: click.by };
+    },
+  }),
   [OP.itemSnooze]: op<ItemSnoozeInput, ItemSnoozeOutput>({
     async run(input, ctx) {
       owner(ctx);
-      const out = store.snooze(ctx.db, input.itemId, input.until, begin(ctx));
+      const now = begin(ctx);
+      const out = store.snooze(ctx.db, input.itemId, input.until, now);
       ctx.statusChanged();
+      armWake(ctx, now);
       return out;
     },
   }),

@@ -59,6 +59,18 @@ export const OWNER = { type: "person", id: "per_01J00000000000000000000000", nam
 export const PORTAL = "https://portal.example.test";
 export const WS = "wsp_01J00000000000000000000000";
 
+/** App secrets per database (SDK: one store per deployment), so a mint and a later check see the same key. */
+const SECRETS = new WeakMap<Db, Map<string, string>>();
+export function secretsFor(db: Db) {
+  const store = SECRETS.get(db) ?? new Map<string, string>();
+  SECRETS.set(db, store);
+  return {
+    get: async (name: string) => store.get(name) ?? null,
+    put: async (name: string, value: string) => void store.set(name, value),
+    delete: async (name: string) => void store.delete(name),
+  };
+}
+
 export interface CtxExtras {
   targets?: string[];
   portal?: boolean;
@@ -73,6 +85,7 @@ export function ctxFor(db: Db, caller: { type: string; id: string; name: string;
     db,
     caller,
     callApp: callApp ?? noApp,
+    secrets: secretsFor(db),
     log: { debug() {}, info() {}, warn() {}, error() {} },
     receipt: { summary() {}, meta() {} },
     statusChanged() {

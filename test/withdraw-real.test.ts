@@ -239,7 +239,7 @@ describe("inbox_withdraw through the real SDK", () => {
 
   it("QA LOW (0.3.0): alerts_set passes the SDK schema with only dm (+ the chosen channel's fields)", async () => {
     const npub = `npub1${"q".repeat(58)}`;
-    assert.deepEqual(await person("alerts_set", { dm: "buzz", buzzTo: npub }), { dm: "buzz", buzzTo: npub, channelAccount: null, channelPerson: null });
+    assert.deepEqual(await person("alerts_set", { dm: "buzz", buzzTo: npub }), { dm: "buzz", buzzTo: npub, channelAccount: null, channelPerson: null, buttons: false });
     assert.equal((await person("alerts_set", { dm: "off" })).dm, "off");
   });
 
