@@ -4,7 +4,7 @@
   "id": "inbox",
   "name": "Operator Inbox",
   "summary": "One queue where your agents ask you questions and request approvals, with the full history and every pending approval in one list.",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "sdkMajor": 1,
   "publisher": {
     "name": "Tealbrick"
@@ -1093,7 +1093,7 @@
     {
       "id": "item_decide_dm",
       "title": "Decide from a chat button",
-      "description": "Connect relays a click on an Approve / Deny button of the owner's Slack or Telegram DM alert. Only Connect can call it. The button value is signed and single-use, and works only for its item and item version, the alert's recipient, and before it expires; anything else is refused and changes nothing.",
+      "description": "Connect relays a click on an Approve / Deny button of the owner's Slack or Telegram DM alert, or the owner's signed ✅ / ❌ reaction on the Buzz DM alert. Only Connect can call it. The button value is signed and single-use, and works only for its item and item version, the alert's recipient, and before it expires; anything else is refused and changes nothing.",
       "input": {
         "type": "object",
         "additionalProperties": false,
@@ -1123,7 +1123,8 @@
                   "slack",
                   "teams",
                   "telegram",
-                  "discord"
+                  "discord",
+                  "buzz"
                 ]
               },
               "id": {
@@ -1132,7 +1133,7 @@
                 "maxLength": 64
               }
             },
-            "description": "The person who clicked, as the chat service reported it to Connect."
+            "description": "The person who clicked (Slack, Telegram) or reacted ✅ / ❌ (Buzz, a Schnorr-signed reaction Connect checked), as the service reported it to Connect."
           },
           "account": {
             "type": "string",
@@ -1873,7 +1874,7 @@
           },
           "buttons": {
             "type": "boolean",
-            "description": "Approve / Deny buttons in the channel DM (Slack, Telegram) for approvals that may be decided from the chat. Off by default; only with dm = channel."
+            "description": "Decide approvals from the alert: Approve / Deny buttons in a Slack or Telegram DM, ✅ / ❌ reactions on a Buzz DM. Only approvals that may be decided from the chat. Off by default."
           }
         }
       },
