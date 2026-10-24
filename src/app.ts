@@ -68,7 +68,7 @@ function begin(ctx: OpContext): number {
 
 /** Background tick (C85 app-initiated calls): expiry and snooze sweeps (badge), due alert sends, the alert digest (C263). */
 export const TICK_MS = 60_000;
-type TickCtx = Pick<StartContext, "db" | "log" | "callApp" | "statusChanged"> & Partial<Pick<StartContext, "ownerLink">>;
+type TickCtx = Pick<StartContext, "db" | "log" | "callApp" | "statusChanged"> & Partial<Pick<StartContext, "ownerLink">> & { secrets?: dm.Secrets };
 let wakeTimer: ReturnType<typeof setTimeout> | undefined;
 /**
  * C331(11): a snooze that ends between two ticks pushes the status at its end, not at the next tick or periodic report.
@@ -102,7 +102,7 @@ export async function tick(ctx: TickCtx, now = clock.now()): Promise<void> {
       // a prune problem must never stop the alert retries of this tick
       ctx.log.warn("inbox activity prune failed", { error: e instanceof Error ? e.message : "unknown" });
     }
-    await retryDue(ctx.db, ctx.callApp, now);
+    await retryDue(ctx.db, ctx.callApp, now, 3, ctx.secrets);
     await digestTick(ctx.db, ctx.callApp, (p) => ctx.ownerLink?.(p) ?? null, now);
   } catch (e) {
     ctx.log.warn("inbox tick failed", { error: e instanceof Error ? e.message : "unknown" });
@@ -131,7 +131,7 @@ function actorOf(ctx: OpContext): store.Actor {
 /** Retries due alert sends; an alert problem never fails the op that triggered the retry. */
 async function retryAlerts(ctx: OpContext, now: number): Promise<void> {
   try {
-    await retryDue(ctx.db, ctx.callApp, now);
+    await retryDue(ctx.db, ctx.callApp, now, 3, ctx.secrets);
   } catch (e) {
     ctx.log.warn("alert retry failed", { error: e instanceof Error ? e.message : "unknown" });
   }

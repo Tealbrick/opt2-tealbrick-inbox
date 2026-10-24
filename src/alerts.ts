@@ -7,7 +7,7 @@
 // one per item, and quiet hours in the owner's time zone hold every alert until the window ends.
 import { ulid } from "@opt2-tealbrick/manifest";
 import type { Db, Json, OpContext } from "@opt2-tealbrick/miniapp-sdk";
-import { buttonChoices, mint, type Recipient, retire, type Secrets } from "./dm.ts";
+import { buttonChoices, mint, type Recipient, retire, retireAll, type Secrets, seal, unsigned } from "./dm.ts";
 import { inQuiet, type QuietHours, quietEnd, validHhmm, validTimeZone } from "./quiet.ts";
 import type { Family, ItemSummary, Kind, Response } from "./store.ts";
 import { readSetting, writeSetting } from "./store.ts";
@@ -114,6 +114,10 @@ export function writeAlerts(db: Db, input: AlertsInput, now = Date.now()): Alert
   db.transaction(() => {
     const before = readAlerts(db);
     writeSetting(db, KEY, next);
+    // QA-INBOX17-1: buttons off, or a new recipient: the buttons already sent never work again (also after buttons go on again)
+    const was = buttonRecipient(before);
+    const now2 = buttonRecipient(next);
+    if (was && (!now2 || now2.account !== was.account || now2.person !== was.person)) retireAll(db, now);
     // a send that still waits for the old target, or for alerts that are now off, never goes out
     if (targetOf(before) !== targetOf(next)) closeUnsent(db, next.dm === "off" ? "alerts_off" : "alerts_changed", now);
     const wasDigest = before.dm !== "off" && before.delivery === "digest";
@@ -216,7 +220,8 @@ export async function alertNewItem(db: Db, callApp: Send, item: ItemSummary, now
       actions = {
         tokenId: m.tokenId,
         input: {
-          actions: m.buttons.map((b) => ({ label: LABEL[b.response]?.label ?? b.response, value: b.value, style: LABEL[b.response]?.style ?? "primary" })),
+          // stored without the signature; attempt() signs right before each send (QA-INBOX17-2)
+          actions: m.buttons.map((b) => ({ label: LABEL[b.response]?.label ?? b.response, value: unsigned(b.value), style: LABEL[b.response]?.style ?? "primary" })),
           actionsUntil: new Date(m.expiresAt).toISOString(),
         },
       };
@@ -243,7 +248,7 @@ export async function alertNewItem(db: Db, callApp: Send, item: ItemSummary, now
     now,
     actions?.tokenId ?? null,
   );
-  if (!quiet) await attempt(db, callApp, "inbox_deliveries", id, now);
+  if (!quiet) await attempt(db, callApp, "inbox_deliveries", id, now, false, secrets);
 }
 
 /** Connect before IN-2 refuses the unknown `actions` field: send the same alert as text only (new key; the token is retired). */
@@ -263,7 +268,7 @@ function toPlain(db: Db, id: string, input: Record<string, Json>, tokenId: strin
  * falls due in quiet hours is moved to the end of the window instead (a held one is only re-checked: it runs after the
  * owner approved it in Connect, which is the owner's own action).
  */
-export async function retryDue(db: Db, callApp: Send, now: number, max = 3): Promise<void> {
+export async function retryDue(db: Db, callApp: Send, now: number, max = 3, secrets?: Secrets): Promise<void> {
   const a = readAlerts(db);
   const quiet = inQuiet(a.quietHours, a.timeZone, now);
   const defer = (table: Table, id: string) =>
@@ -276,7 +281,7 @@ export async function retryDue(db: Db, callApp: Send, now: number, max = 3): Pro
     .all(now, max);
   for (const d of due) {
     if (quiet && d.status === "pending") defer("inbox_deliveries", String(d.id));
-    else await attempt(db, callApp, "inbox_deliveries", String(d.id), now);
+    else await attempt(db, callApp, "inbox_deliveries", String(d.id), now, false, secrets);
   }
   const digests = db.prepare("SELECT id, status FROM inbox_digests WHERE status IN ('pending', 'held') AND next_at <= ? ORDER BY next_at ASC LIMIT ?").all(now, max);
   for (const d of digests) {
@@ -388,7 +393,7 @@ function errorCode(e: unknown): string {
   return typeof code === "string" && code ? code.slice(0, 64) : "send_failed";
 }
 
-async function attempt(db: Db, callApp: Send, table: Table, id: string, now: number, leased = false): Promise<void> {
+async function attempt(db: Db, callApp: Send, table: Table, id: string, now: number, leased = false, secrets?: Secrets): Promise<void> {
   if (!leased) {
     // the lease: of two callers that found the same due row (the tick, an op's retry, a new ask), only one sends it
     const got = db.prepare(`UPDATE ${table} SET next_at = ? WHERE id = ? AND status IN ('pending', 'held') AND next_at <= ?`).run(now + LEASE_MS, id, now).changes;
@@ -424,6 +429,19 @@ async function attempt(db: Db, callApp: Send, table: Table, id: string, now: num
   const tokenCol = table === "inbox_deliveries" ? ", token_id" : ", NULL AS token_id";
   const d = db.prepare(`SELECT op, input, idem_key, attempts, hold_id${tokenCol} FROM ${table} WHERE id = ? AND status IN ('pending', 'held')`).get(id);
   if (!d) return;
+  let input = JSON.parse(String(d.input)) as Record<string, Json>;
+  if (d.token_id && Array.isArray(input.actions)) {
+    const actions = input.actions as { label: string; value: string; style: string }[];
+    try {
+      if (!secrets) throw new Error("no secrets");
+      const values = await seal(db, secrets, String(d.token_id), actions.map((a) => a.value));
+      input = { ...input, actions: actions.map((a, i) => ({ ...a, value: values[i] as string })) };
+    } catch {
+      // the key or the token is gone, or the buttons were turned off: the same alert as text only
+      toPlain(db, id, input, String(d.token_id), now);
+      return attempt(db, callApp, table, id, now, true, secrets);
+    }
+  }
   const attempts = Number(d.attempts) + 1;
   // The send is awaited, so a withdraw can close this delivery meanwhile (status failed, error withdrawn). Every write here
   // is guarded on the row still being pending or held: the result of a send never overwrites a closed row.
@@ -440,7 +458,7 @@ async function attempt(db: Db, callApp: Send, table: Table, id: string, now: num
     const timeout = new Promise<"timeout">((resolve) => {
       timer = setTimeout(() => resolve("timeout"), SEND_TIMEOUT_MS);
     });
-    const r = await Promise.race([callApp(CONNECT, String(d.op), JSON.parse(String(d.input)) as Json, { idempotencyKey: String(d.idem_key) }), timeout]);
+    const r = await Promise.race([callApp(CONNECT, String(d.op), input as Json, { idempotencyKey: String(d.idem_key) }), timeout]);
     // A timed-out send may still land; the retry with the same key then returns the stored result.
     if (r === "timeout") set("pending", null, "timeout");
     // While the hold waits, the same key answers the same holdId. A NEW holdId means the first hold was decided
@@ -450,14 +468,17 @@ async function attempt(db: Db, callApp: Send, table: Table, id: string, now: num
     else {
       set("sent", null, null);
       // Teams / Discord: Connect sent text only; the buttons never reached the owner
-      if (d.token_id && (r.output as { actions?: unknown } | null)?.actions === "unsupported") retire(db, String(d.token_id), now);
+      // Teams / Discord, or buttons that expired while the send waited for approval (QA-CON23-2): no usable buttons
+      const shown = (r.output as { actions?: unknown } | null)?.actions;
+      if (d.token_id && (shown === "unsupported" || shown === "expired")) retire(db, String(d.token_id), now);
     }
   } catch (e) {
     const code = errorCode(e);
-    if (code === "input_invalid" && d.token_id) {
+    // an older Connect (unknown field) or buttons Connect refuses (QA-INBOX17-3, e.g. late after a long hold): text only
+    if ((code === "input_invalid" || code === "actions_invalid") && d.token_id) {
       clearTimeout(timer);
       toPlain(db, id, JSON.parse(String(d.input)) as Record<string, Json>, String(d.token_id), now);
-      return attempt(db, callApp, table, id, now, true);
+      return attempt(db, callApp, table, id, now, true, secrets);
     }
     const first = FIRST_CONTACT[code];
     if (first && String(d.op) !== first) {
@@ -465,7 +486,7 @@ async function attempt(db: Db, callApp: Send, table: Table, id: string, now: num
       // (Connect holds it for the owner's approval), same input and key, and try it at once.
       db.prepare(`UPDATE ${table} SET op = ?, updated_at = ? WHERE id = ? AND status IN ('pending', 'held')`).run(first, now, id);
       clearTimeout(timer);
-      return attempt(db, callApp, table, id, now, true);
+      return attempt(db, callApp, table, id, now, true, secrets);
     }
     // denied hold, no grant (Connect not deployed), no sender identity, paused…: final, shown to the owner
     set("failed", null, code);
