@@ -20,7 +20,7 @@ export const TOKEN_TTL_MS = 24 * 3600 * 1000;
 export const MAX_BAD_MACS = 5;
 const VALUE = /^ib1\.([A-Za-z0-9_-]{16})\.([ad])\.([A-Za-z0-9_-]{22})$/;
 const CHOICE: Record<string, Response> = { a: "approve", d: "deny" };
-const SERVICES: ReadonlySet<string> = new Set(["slack", "teams", "telegram", "discord"]);
+const SERVICES: ReadonlySet<string> = new Set(["slack", "teams", "telegram", "discord", "buzz"]);
 const LETTER: Partial<Record<Response, string>> = { approve: "a", deny: "d" };
 
 export type Secrets = Pick<AppSecrets, "get" | "put">;

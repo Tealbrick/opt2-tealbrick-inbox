@@ -26,7 +26,7 @@ const FAMILY_LABEL: Record<string, string> = {
 
 /** IN-2: "Slack" / "Telegram" when the answer came from a chat button (decidedBy `<service>:<user id>`), else null. */
 function viaChat(decidedBy: string): string | null {
-  const service = /^(slack|telegram|teams|discord):/.exec(decidedBy)?.[1];
+  const service = /^(slack|telegram|teams|discord|buzz):/.exec(decidedBy)?.[1];
   return service ? `${service[0]?.toUpperCase()}${service.slice(1)}` : null;
 }
 

@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { Json, TbError } from "@opt2-tealbrick/miniapp-sdk";
-import { BUTTONS_LINE, INBOX_ONLY_LINE } from "../src/alerts.ts";
+import { BUTTONS_LINE, BUZZ_REACT_LINE, INBOX_ONLY_LINE } from "../src/alerts.ts";
 import { clock, handlers, tick } from "../src/app.ts";
 import { MAX_BAD_MACS, TOKEN_TTL_MS } from "../src/dm.ts";
 import { AGENT, type CallApp, ctxFor, memoryDb, OWNER, type Sent, secretsFor } from "./helpers.ts";
@@ -348,4 +348,62 @@ test("mutation guard: the lock comes at the fifth wrong signature (literal), not
   const guess = (n: number) => click(db, `ib1.${tid}.a.${String(n).padStart(22, "y")}`);
   for (const n of [1, 2, 3, 4]) await assert.rejects(guess(n), code("token_invalid"));
   await assert.rejects(guess(5), code("token_locked"));
+});
+
+// ── C343a: Buzz alerts take the owner's signed ✅ / ❌ reaction (Connect checks it and relays the same token) ──
+
+const NPUB = `npub1${"q".repeat(58)}`;
+
+async function buzzSetup(buttons = true) {
+  clock.now = () => NOW;
+  const db = memoryDb();
+  await h.alerts_set.run({ dm: "buzz", buzzTo: NPUB, buttons }, ctxFor(db, OWNER));
+  return db;
+}
+
+test("Buzz (C343a): the alert carries the reaction line and signed values; a relayed ✅ decides once", async () => {
+  const db = await buzzSetup();
+  const c = fakeConnect(() => ({ status: "ok", output: { id: "e1", channel: "c1", to: NPUB, relays: [], actions: "shown" } }));
+  const out = await h.inbox_ask.run({ kind: "approval", title: "Post?", family: "public_link" }, ctxFor(db, AGENT, c.callApp));
+  assert.equal(c.sent[0]?.op, "buzz_dm");
+  const input = c.sent[0]?.input as { to: string; content: string; actions: Action[] };
+  assert.equal(input.to, NPUB);
+  assert.match(input.content, new RegExp(`${BUZZ_REACT_LINE.replace(/[().;]/g, "\\$&")}$`));
+  assert.deepEqual(
+    input.actions.map((a) => [a.label, a.style]),
+    [
+      ["Approve", "primary"],
+      ["Deny", "danger"],
+    ],
+  );
+  const buzz = (token: string, extra: Record<string, unknown> = {}) =>
+    h.item_decide_dm.run({ token, clicker: { service: "buzz", id: NPUB }, account: "buzz", ...extra }, ctxFor(db, CONNECT));
+  // the service is pinned: a Slack relay of a Buzz token is refused, and so is another npub
+  await assert.rejects(buzz(input.actions[0]?.value as string, { clicker: { service: "slack", id: NPUB } }), code("wrong_person"));
+  await assert.rejects(buzz(input.actions[0]?.value as string, { clicker: { service: "buzz", id: `npub1${"z".repeat(58)}` } }), code("wrong_person"));
+  const r = await buzz(input.actions[0]?.value as string);
+  assert.deepEqual([r.response, r.decidedBy], ["approve", `buzz:${NPUB}`]);
+  assert.equal((await h.inbox_status.run({ itemId: out.itemId }, ctxFor(db, AGENT))).response, "approve");
+  await assert.rejects(buzz(input.actions[1]?.value as string), code("token_used"));
+});
+
+test("Buzz: buttons off → plain alert; money / no family → Inbox only; the text fallback keeps the content field", async () => {
+  const off = await buzzSetup(false);
+  const a = await ask(off, { kind: "approval", title: "Plain", family: "none" });
+  assert.equal(inp(a.sent).actions, undefined);
+  const db = await buzzSetup();
+  for (const input of [
+    { kind: "approval", title: "Refund?", family: "money" },
+    { kind: "approval", title: "No family" },
+  ]) {
+    const { sent } = await ask(db, input);
+    assert.equal(inp(sent).actions, undefined, input.title);
+    assert.match(String(inp(sent).content), /Decide this in Operator Inbox/u);
+  }
+  const old = fakeConnect((n) => (n === 1 ? Object.assign(new Error("unknown field"), { code: "input_invalid" }) : { status: "ok", output: {} }));
+  await h.inbox_ask.run({ kind: "approval", title: "Old Connect", family: "none" }, ctxFor(db, AGENT, old.callApp));
+  const plain = old.sent[1]?.input as Record<string, unknown>;
+  assert.equal(plain.actions, undefined);
+  assert.match(String(plain.content), /Open Operator Inbox to answer\.$/u);
+  assert.equal(plain.text, undefined);
 });

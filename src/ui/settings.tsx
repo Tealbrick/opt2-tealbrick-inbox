@@ -74,9 +74,16 @@ export function SettingsPage() {
               />
             </Field>
             {form.dm === "buzz" ? (
-              <Field label="Your Buzz key" hint="npub1… or 64 hex characters">
-                <TextInput className="mono" value={form.buzzTo ?? ""} onChange={(e) => set({ buzzTo: e.target.value })} />
-              </Field>
+              <>
+                <Field label="Your Buzz key" hint="npub1… or 64 hex characters">
+                  <TextInput className="mono" value={form.buzzTo ?? ""} onChange={(e) => set({ buzzTo: e.target.value })} />
+                </Field>
+                <Switch label="Answer approvals from Buzz (react ✅ or ❌ on the alert)" checked={form.buttons} onCheckedChange={(buttons) => set({ buttons })} />
+                <p className="tb-hint measure">
+                  Only your own signed reaction counts, once, for 24 hours at most. The first ✅ or ❌ decides; removing it later changes nothing. A text reply never
+                  decides. Approvals that spend money or delete data, and approvals without a declared kind, never take reactions: you decide them here.
+                </p>
+              </>
             ) : null}
             {form.dm === "channel" ? (
               <>
