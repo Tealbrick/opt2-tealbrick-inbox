@@ -16,6 +16,8 @@ CREATE TABLE inbox_dm_tokens (
   expires_at INTEGER NOT NULL,
   used_at INTEGER,
   used_by TEXT,
+  -- clicks whose signature did not match this row; at MAX_BAD_MACS the token is locked (used_by 'locked')
+  bad_macs INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL
 );
 CREATE INDEX inbox_dm_tokens_item ON inbox_dm_tokens (item_id);

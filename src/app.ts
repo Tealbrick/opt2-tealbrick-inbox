@@ -228,7 +228,7 @@ export const handlers = {
       const c = ctx.caller;
       if (c.type !== "app" || c.product !== CONNECT_PRODUCT) throw new TbError("connect_only", "Only Connect can relay a chat button.", 403);
       const now = begin(ctx);
-      const click = await dm.check(ctx.db, ctx.secrets, buttonRecipient(readAlerts(ctx.db)), input, now);
+      const click = await dm.check(ctx.db, ctx.secrets, buttonRecipient(readAlerts(ctx.db)), input, now, ctx.log);
       const item = store.familyOf(ctx.db, click.itemId);
       if (item === undefined || item.kind !== "approval" || item.family === null || store.INBOX_ONLY_FAMILIES.has(item.family))
         throw new TbError("decide_in_inbox", "Decide this in Operator Inbox.", 403);

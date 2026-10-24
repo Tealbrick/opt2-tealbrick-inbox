@@ -7,12 +7,17 @@
 // mac = the first 16 bytes of HMAC-SHA256(key, "ib1|tid|c|item|version|account|person|expiresAt"), all base64url.
 // The key is 32 random bytes in the app secrets (never in the database, never logged).
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { type AppSecrets, type Db, TbError } from "@opt2-tealbrick/miniapp-sdk";
+import { type AppSecrets, type Db, type Logger, TbError } from "@opt2-tealbrick/miniapp-sdk";
 import { type Family, INBOX_ONLY_FAMILIES, type Kind, type Response } from "./store.ts";
 
 export const KEY_NAME = "dm-token-key";
 /** A button works for at most this long (and never past the item's expiry). */
 export const TOKEN_TTL_MS = 24 * 3600 * 1000;
+/**
+ * C334(1): wrong signatures on one token id before the token is locked for good. The row is the real guard (single use,
+ * recipient, expiry); the lock stops a guess-the-signature run against a known token id.
+ */
+export const MAX_BAD_MACS = 5;
 const VALUE = /^ib1\.([A-Za-z0-9_-]{16})\.([ad])\.([A-Za-z0-9_-]{22})$/;
 const CHOICE: Record<string, Response> = { a: "approve", d: "deny" };
 const SERVICES: ReadonlySet<string> = new Set(["slack", "teams", "telegram", "discord"]);
@@ -114,7 +119,7 @@ const invalid = (): never => {
  * recipient, the person who clicked, single use, expiry. A wrong person never uses the token up. The caller then uses
  * the token and decides in one transaction (`consume`).
  */
-export async function check(db: Db, secrets: Secrets, current: Recipient | null, click: Click, now: number): Promise<Checked> {
+export async function check(db: Db, secrets: Secrets, current: Recipient | null, click: Click, now: number, log?: Pick<Logger, "warn">): Promise<Checked> {
   const m = VALUE.exec(click.token);
   if (!m) throw new TbError("token_invalid", "This button does not work. Open Operator Inbox to decide.", 400);
   const [, tid, c] = m as unknown as [string, string, string, string];
@@ -125,7 +130,19 @@ export async function check(db: Db, secrets: Secrets, current: Recipient | null,
   const minted: Recipient = { account: String(r.account), person: String(r.person) };
   const want = Buffer.from(mac(Buffer.from(String(k), "base64url"), tid, c, String(r.item_id), Number(r.item_version), minted, Number(r.expires_at)));
   const got = Buffer.from(click.token.slice(-22));
-  if (want.length !== got.length || !timingSafeEqual(want, got)) invalid();
+  if (r.used_by === "locked") throw new TbError("token_locked", "This button was locked after wrong attempts. Open Operator Inbox to decide.", 429);
+  if (want.length !== got.length || !timingSafeEqual(want, got)) {
+    // counted outside any transaction, so a refusal still records the attempt
+    db.prepare("UPDATE inbox_dm_tokens SET bad_macs = bad_macs + 1 WHERE id = ?").run(tid);
+    const bad = Number(db.prepare("SELECT bad_macs FROM inbox_dm_tokens WHERE id = ?").get(tid)?.bad_macs ?? 0);
+    log?.warn("inbox dm token: wrong signature", { token: tid, item: String(r.item_id), attempts: bad });
+    if (bad >= MAX_BAD_MACS) {
+      db.prepare("UPDATE inbox_dm_tokens SET used_at = COALESCE(used_at, ?), used_by = 'locked' WHERE id = ?").run(now, tid);
+      log?.warn("inbox dm token locked", { token: tid, item: String(r.item_id) });
+      throw new TbError("token_locked", "This button was locked after wrong attempts. Open Operator Inbox to decide.", 429);
+    }
+    invalid();
+  }
   if (!current || current.account !== minted.account || current.person !== minted.person)
     throw new TbError("buttons_off", "Chat buttons are off for this alert. Open Operator Inbox to decide.", 409);
   // a service-named recipient (slack, sender:slack) also pins the service; an account id is pinned by Connect's record

@@ -4,7 +4,7 @@ import test from "node:test";
 import type { Json, TbError } from "@opt2-tealbrick/miniapp-sdk";
 import { BUTTONS_LINE, INBOX_ONLY_LINE } from "../src/alerts.ts";
 import { clock, handlers, tick } from "../src/app.ts";
-import { TOKEN_TTL_MS } from "../src/dm.ts";
+import { MAX_BAD_MACS, TOKEN_TTL_MS } from "../src/dm.ts";
 import { AGENT, type CallApp, ctxFor, memoryDb, OWNER, type Sent } from "./helpers.ts";
 
 const h = handlers as any;
@@ -216,4 +216,23 @@ test("snooze end pushes the status at once (C331(11)), from the tick and from th
   await new Promise((r) => setTimeout(r, 120));
   assert.equal(status.pushes, before + 1, "timer push");
   clock.now = () => NOW;
+});
+
+test("brute force (C334): wrong signatures on one token id are logged and lock the token at the fifth", async () => {
+  const db = await setup();
+  const { itemId, actions } = await ask(db);
+  const approve = actions[0]?.value as string;
+  const [, tid] = approve.split(".") as [string, string];
+  const warnings: { msg: string; fields: Record<string, unknown> }[] = [];
+  const ctx = ctxFor(db, CONNECT);
+  (ctx as unknown as { log: unknown }).log = { debug() {}, info() {}, error() {}, warn: (msg: string, fields: Record<string, unknown>) => void warnings.push({ msg, fields }) };
+  const guess = (n: number) => h.item_decide_dm.run({ token: `ib1.${tid}.a.${String(n).padStart(22, "x")}`, clicker: { service: "slack", id: OWNER_ID }, account: "slack" }, ctx);
+  for (let n = 1; n <= MAX_BAD_MACS - 1; n++) await assert.rejects(guess(n), code("token_invalid"));
+  await assert.rejects(guess(MAX_BAD_MACS), code("token_locked"));
+  assert.equal(warnings.filter((w) => w.msg === "inbox dm token: wrong signature").length, MAX_BAD_MACS);
+  assert.ok(warnings.some((w) => w.msg === "inbox dm token locked" && w.fields.token === tid));
+  assert.ok(!JSON.stringify(warnings).includes(approve.slice(-22)), "the real signature is never logged");
+  // the real button is dead now; the item waits in Inbox
+  await assert.rejects(click(db, approve), code("token_locked"));
+  assert.equal((await h.inbox_status.run({ itemId }, ctxFor(db, AGENT))).status, "open");
 });
