@@ -11,6 +11,11 @@ export type Kind = (typeof KINDS)[number];
 export type Response = (typeof RESPONSES)[number];
 export type Priority = (typeof PRIORITIES)[number];
 export type Status = "open" | "answered" | "expired";
+/** IN-2: the hold family the asker declares (C284 D4 names; `none` = no held family). Not declared = null. */
+export const FAMILIES = ["destructive", "money", "first_contact", "identity", "public_link", "none"] as const;
+export type Family = (typeof FAMILIES)[number];
+/** Families the owner never decides from a chat DM (C322(9): money and delete stay in Portal, TBD and TBM). */
+export const INBOX_ONLY_FAMILIES: ReadonlySet<Family> = new Set(["destructive", "money"]);
 
 /** Allowed answers per kind; the first list is also the default. */
 export const KIND_RESPONSES: Record<Kind, readonly Response[]> = {
@@ -101,6 +106,8 @@ export interface ActivityView {
 
 export interface ItemDetail extends ItemSummary {
   context: string | null;
+  /** IN-2: the declared hold family, or null when the asker declared none */
+  family: Family | null;
   responses: Response[];
   messages: Message[];
   decision: Decision | null;
@@ -149,9 +156,29 @@ function row(db: Db, id: string): Row | undefined {
   return db.prepare(`${SELECT} WHERE i.id = ?`).get(id);
 }
 
+/**
+ * Ends every snooze whose time has passed (C331(11)): the item already counts as pending, but the status push must
+ * happen now, not at the next periodic report. Returns the number of items that woke up (> 0 → statusChanged).
+ */
+export function wakeDue(db: Db, now: number): number {
+  return Number(db.prepare("UPDATE inbox_items SET snoozed_until = NULL WHERE status = 'open' AND snoozed_until IS NOT NULL AND snoozed_until <= ?").run(now).changes);
+}
+
+/** The next snooze end after `now` (epoch ms), or null when nothing is snoozed. */
+export function nextWake(db: Db, now: number): number | null {
+  const r = db.prepare("SELECT MIN(snoozed_until) AS t FROM inbox_items WHERE status = 'open' AND snoozed_until > ?").get(now);
+  return r?.t === null || r?.t === undefined ? null : Number(r.t);
+}
+
 /** Expires every open item whose time has passed (lazy sweep, run at the start of each op). */
 export function expireDue(db: Db, now: number): number {
   return Number(db.prepare("UPDATE inbox_items SET status = 'expired', updated_at = ? WHERE status = 'open' AND expires_at <= ?").run(now, now).changes);
+}
+
+/** IN-2: kind and declared family of an item (undefined: no such item). */
+export function familyOf(db: Db, itemId: string): { kind: Kind; family: Family | null } | undefined {
+  const r = db.prepare("SELECT kind, family FROM inbox_items WHERE id = ?").get(itemId);
+  return r ? { kind: r.kind as Kind, family: (str(r.family) as Family | null) ?? null } : undefined;
 }
 
 // ── agent side ──
@@ -165,6 +192,8 @@ export interface AskInput {
   expiresInS?: number;
   /** R5: a page of the calling app; the handler accepts it only from an app with a verified product and a valid launch path */
   open?: { path: string };
+  /** IN-2: the hold family of what the owner approves; decides whether the DM alert may carry buttons */
+  family?: Family;
 }
 
 /** `from.product` (an app's VERIFIED product) is recorded with the item: inbox_withdraw matches on it. */
@@ -184,8 +213,8 @@ export function ask(db: Db, from: From & { product?: string | null }, input: Ask
   const id = `itm_${ulid(now)}`;
   const expiresAt = now + (input.expiresInS ?? DEFAULT_EXPIRY_S) * 1000;
   db.prepare(
-    `INSERT INTO inbox_items (id, kind, title, context, responses, from_type, from_id, from_name, from_product, open_path, status, priority, version, acked_at, snoozed_until, created_at, updated_at, expires_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, 1, NULL, NULL, ?, ?, ?)`,
+    `INSERT INTO inbox_items (id, kind, title, context, responses, from_type, from_id, from_name, from_product, open_path, family, status, priority, version, acked_at, snoozed_until, created_at, updated_at, expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, 1, NULL, NULL, ?, ?, ?)`,
   ).run(
     id,
     input.kind,
@@ -198,6 +227,7 @@ export function ask(db: Db, from: From & { product?: string | null }, input: Ask
     from.type === "app" && from.product ? from.product : null,
     // a page of the raising app only: never stored without the verified product it will be linked to
     from.type === "app" && from.product && input.open ? input.open.path : null,
+    input.family ?? null,
     input.priority ?? "normal",
     now,
     now,
@@ -521,6 +551,7 @@ export function get(db: Db, itemId: string, now: number, linkFor?: LinkFor): Ite
   return {
     ...toSummary(r, now),
     context: str(r.context),
+    family: (str(r.family) as Family | null) ?? null,
     responses: JSON.parse(String(r.responses)) as Response[],
     messages,
     decision: d ? { response: String(d.response) as Response, message: str(d.message), decidedBy: String(d.decided_by), decidedAt: iso(d.decided_at) } : null,
