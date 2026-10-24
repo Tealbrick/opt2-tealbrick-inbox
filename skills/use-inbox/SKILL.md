@@ -12,6 +12,7 @@ description: How to ask the owner a question or request the owner's approval thr
   - `question`: the owner answers in words (answer) or asks you to clarify.
 - Put the facts the owner needs in `context`: what you want to do, the options, and what happens next.
 - Optional: `priority` (low, normal, high, urgent), `responses` (limit the allowed answers), `expiresInS` (default 7 days).
+- For an approval, set `family` to say what the owner approves: `money` (spends or refunds money), `destructive` (deletes data), `first_contact` (writes to a new person), `identity` (acts as someone or changes who can sign in), `public_link` (makes something public), or `none` (none of these). Be honest: the owner may approve `first_contact`, `identity`, `public_link` and `none` with a button in a chat message; `money`, `destructive` and an approval without `family` are decided in Operator Inbox only.
 - Do not send `open`: only an app can link an item to one of its pages. An agent gets `open_not_allowed`.
 - Always send an idempotency key. If you repeat the call with the same key and the same input, you get the first item back, not a second one.
 - Keep the returned `itemId`. Do not wait in a loop inside one turn; continue with other work.
