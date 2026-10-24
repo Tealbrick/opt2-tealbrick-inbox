@@ -41,8 +41,15 @@ export function readAlerts(db: Db): Alerts {
 
 /** The recipient chat buttons are bound to now, or null when buttons are off (every outstanding token then stops working). */
 export function buttonRecipient(a: Alerts): Recipient | null {
-  return a.dm === "channel" && a.buttons && a.channelAccount && a.channelPerson ? { account: a.channelAccount, person: a.channelPerson } : null;
+  if (!a.buttons) return null;
+  if (a.dm === "channel" && a.channelAccount && a.channelPerson) return { account: a.channelAccount, person: a.channelPerson };
+  // C343a: Buzz has no buttons; Connect reads the owner's signed ✅ / ❌ reaction on the alert instead
+  if (a.dm === "buzz" && a.buzzTo) return { account: BUZZ_ACCOUNT, person: a.buzzTo };
+  return null;
 }
+
+/** The recipient account of a Buzz alert's token (Connect relays a Buzz reaction with this account). */
+export const BUZZ_ACCOUNT = "buzz";
 
 /** Validates and stores the setting. Only `dm` is required; the other channel's fields may be left out. They are cleared, so nothing stale lingers. */
 export function writeAlerts(db: Db, input: Pick<Alerts, "dm"> & Partial<Alerts>, now = Date.now()): Alerts {
@@ -53,7 +60,7 @@ export function writeAlerts(db: Db, input: Pick<Alerts, "dm"> & Partial<Alerts>,
   else if (input.dm === "buzz") {
     const to = blank(input.buzzTo);
     if (!to || !NPUB.test(to)) throw new AlertsError("buzzTo must be your Buzz key (npub1… or 64 hex characters).");
-    next = { dm: "buzz", buzzTo: to, channelAccount: null, channelPerson: null, buttons: false };
+    next = { dm: "buzz", buzzTo: to, channelAccount: null, channelPerson: null, buttons: input.buttons === true };
   } else {
     const account = blank(input.channelAccount);
     const person = blank(input.channelPerson);
@@ -78,6 +85,8 @@ export function alertText(item: ItemSummary): string {
 
 const OPEN_LINE = "Open Operator Inbox to answer.";
 export const BUTTONS_LINE = "Tap Approve or Deny below, or open Operator Inbox to answer.";
+/** C343a: the Buzz alert's instruction (reactions instead of buttons; a text reply never decides). */
+export const BUZZ_REACT_LINE = "React ✅ to approve or ❌ to deny (once, within 24 hours; the first reaction counts). A text reply does not decide.";
 export const INBOX_ONLY_LINE = "Decide this in Operator Inbox (Portal, Tealbrick desktop or mobile).";
 
 /** The alert text with its last line for the DM: buttons, Inbox only (buttons on, but this item gets none), or the plain line. */
@@ -114,7 +123,7 @@ export async function alertNewItem(db: Db, callApp: Send, item: ItemSummary, now
     const choices = buttonChoices(item.kind as Kind, family, r ? (JSON.parse(String(r.responses)) as Response[]) : []);
     if (choices.length > 0 && secrets) {
       const m = await mint(db, secrets, { id: item.id, version: item.version, expiresAt: Date.parse(item.expiresAt) }, to, choices, now);
-      text = textWith(item, BUTTONS_LINE);
+      text = textWith(item, alerts.dm === "buzz" ? BUZZ_REACT_LINE : BUTTONS_LINE);
       actions = {
         tokenId: m.tokenId,
         input: {
@@ -139,9 +148,13 @@ export async function alertNewItem(db: Db, callApp: Send, item: ItemSummary, now
 /** Connect before IN-2 refuses the unknown `actions` field: send the same alert as text only (new key; the token is retired). */
 function toPlain(db: Db, id: string, input: Record<string, Json>, tokenId: string, now: number): void {
   const { actions: _a, actionsUntil: _u, ...rest } = input;
-  const text = String(rest.text ?? "").replace(BUTTONS_LINE, OPEN_LINE);
+  // the channel DM's field is `text`, the Buzz DM's `content`
+  const field = "content" in rest ? "content" : "text";
+  const text = String(rest[field] ?? "")
+    .replace(BUTTONS_LINE, OPEN_LINE)
+    .replace(BUZZ_REACT_LINE, OPEN_LINE);
   db.prepare("UPDATE inbox_deliveries SET input = ?, idem_key = idem_key || '-plain', token_id = NULL, updated_at = ? WHERE id = ? AND status IN ('pending', 'held')").run(
-    JSON.stringify({ ...rest, text }),
+    JSON.stringify({ ...rest, [field]: text }),
     now,
     id,
   );
