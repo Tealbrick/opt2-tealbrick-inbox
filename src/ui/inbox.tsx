@@ -15,6 +15,21 @@ type Activity = ItemGetOutput["activity"][number];
 type Priority = Summary["priority"];
 
 const PRIORITY_STATUS: Record<Priority, Status> = { urgent: "needs-you", high: "needs-you", normal: "default", low: "default" };
+/** IN-2: the declared hold family as the owner reads it. */
+const FAMILY_LABEL: Record<string, string> = {
+  destructive: "deletes data",
+  money: "spends money",
+  first_contact: "first contact",
+  identity: "identity",
+  public_link: "public link",
+};
+
+/** IN-2: "Slack" / "Telegram" when the answer came from a chat button (decidedBy `<service>:<user id>`), else null. */
+function viaChat(decidedBy: string): string | null {
+  const service = /^(slack|telegram|teams|discord|buzz):/.exec(decidedBy)?.[1];
+  return service ? `${service[0]?.toUpperCase()}${service.slice(1)}` : null;
+}
+
 const PRIORITY_LABEL: Record<Priority, string> = { low: "Low", normal: "Normal", high: "High", urgent: "Urgent" };
 const LABEL: Record<Response, string> = { approve: "Approve", deny: "Deny", answer: "Send answer", clarify: "Ask for clarification" };
 const VARIANT: Record<Response, "primary" | "danger" | "secondary"> = { approve: "primary", answer: "primary", deny: "danger", clarify: "secondary" };
@@ -137,6 +152,7 @@ function Detail({ id, onChanged }: { id: string; onChanged: () => void }) {
         {open ? <Tag status="needs-you">waiting for you</Tag> : <Tag status={item.status === "answered" ? "live" : "default"}>{item.withdrawal ? "withdrawn" : item.status}</Tag>}
         <Tag status={PRIORITY_STATUS[item.priority]}>{PRIORITY_LABEL[item.priority]}</Tag>
         {item.acked && open ? <Tag>seen</Tag> : null}
+        {item.family && item.family !== "none" ? <Tag>{FAMILY_LABEL[item.family]}</Tag> : null}
         {open ? <span className="tb-hint">Expires {day(item.expiresAt)}</span> : null}
       </div>
       {item.context ? <p className="tb-soft pre">{item.context}</p> : <p className="tb-hint">The agent gave no further context.</p>}
@@ -160,7 +176,8 @@ function Detail({ id, onChanged }: { id: string; onChanged: () => void }) {
       ) : null}
       {item.decision ? (
         <Notice tone="live">
-          <strong>You answered {item.decision.response}</strong> {when(item.decision.decidedAt)}.
+          <strong>You answered {item.decision.response}</strong> {when(item.decision.decidedAt)}
+          {viaChat(item.decision.decidedBy) ? ` in ${viaChat(item.decision.decidedBy)}` : ""}.
         </Notice>
       ) : null}
       {item.withdrawal ? (

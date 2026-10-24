@@ -1,7 +1,7 @@
 // Settings: the optional owner alert DM (op alerts_get / alerts_set). Off by default.
 import type { Json } from "@opt2-tealbrick/miniapp-sdk";
 import { callOp } from "@opt2-tealbrick/miniapp-sdk/client";
-import { Button, Field, Notice, Section, Select, TextInput } from "@opt2-tealbrick/ui";
+import { Button, Field, Notice, Section, Select, Switch, TextInput } from "@opt2-tealbrick/ui";
 import { useEffect, useRef, useState } from "react";
 import type { AlertsGetOutput } from "#kit";
 import { errText, Head, LoadError, Loading, useOp } from "./shared.tsx";
@@ -57,9 +57,16 @@ export function SettingsPage() {
               />
             </Field>
             {form.dm === "buzz" ? (
-              <Field label="Your Buzz key" hint="npub1… or 64 hex characters">
-                <TextInput className="mono" value={form.buzzTo ?? ""} onChange={(e) => set({ buzzTo: e.target.value })} />
-              </Field>
+              <>
+                <Field label="Your Buzz key" hint="npub1… or 64 hex characters">
+                  <TextInput className="mono" value={form.buzzTo ?? ""} onChange={(e) => set({ buzzTo: e.target.value })} />
+                </Field>
+                <Switch label="Answer approvals from Buzz (react ✅ or ❌ on the alert)" checked={form.buttons} onCheckedChange={(buttons) => set({ buttons })} />
+                <p className="tb-hint measure">
+                  Only your own signed reaction counts, once, for 24 hours at most. The first ✅ or ❌ decides; removing it later changes nothing. A text reply never
+                  decides. Approvals that spend money or delete data, and approvals without a declared kind, never take reactions: you decide them here.
+                </p>
+              </>
             ) : null}
             {form.dm === "channel" ? (
               <>
@@ -69,6 +76,11 @@ export function SettingsPage() {
                 <Field label="Your handle in that channel">
                   <TextInput value={form.channelPerson ?? ""} onChange={(e) => set({ channelPerson: e.target.value })} />
                 </Field>
+                <Switch label="Answer approvals from the chat (Approve and Deny buttons)" checked={form.buttons} onCheckedChange={(buttons) => set({ buttons })} />
+                <p className="tb-hint measure">
+                  Only you can use the buttons, once, for 24 hours at most. Approvals that spend money or delete data, and approvals without a declared kind, never get
+                  buttons: you decide them here. Turning this off stops every button that was already sent.
+                </p>
               </>
             ) : null}
           </div>
