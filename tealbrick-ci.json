@@ -1,8 +1,16 @@
 {
   "$schema": "https://raw.githubusercontent.com/Tealbrick/opt2-tealbrick-platform/ci-v9.9/ci/tealbrick-ci.schema.json",
   "kind": "miniapp",
-  "paths": ["."],
+  "paths": [
+    "."
+  ],
   "images": [
-    { "name": "opt2-tealbrick-inbox", "product": "inbox", "kind": "app", "manifest": "tealbrick.manifest.json" }
+    {
+      "name": "opt2-tealbrick-inbox",
+      "product": "inbox",
+      "kind": "app",
+      "manifest": "tealbrick.manifest.json",
+      "upgradeFrom": "<=0.3.0"
+    }
   ]
 }
