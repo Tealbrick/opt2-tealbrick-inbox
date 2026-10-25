@@ -4,7 +4,7 @@
   "id": "inbox",
   "name": "Operator Inbox",
   "summary": "One queue where your agents ask you questions and request approvals, with the full history and every pending approval in one list.",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "sdkMajor": 1,
   "publisher": {
     "name": "Tealbrick"
@@ -631,7 +631,8 @@
           "deliveries",
           "withdrawal",
           "activity",
-          "open"
+          "open",
+          "digest"
         ],
         "properties": {
           "id": {
@@ -998,6 +999,42 @@
               }
             },
             "description": "The raising app's page for this item (inbox_ask open), or null when none was given or the Portal link is not known yet."
+          },
+          "digest": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": false,
+            "required": [
+              "status",
+              "at",
+              "error"
+            ],
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": [
+                  "next",
+                  "pending",
+                  "held",
+                  "sent",
+                  "failed"
+                ],
+                "description": "next: the item waits for the next digest; the others are the digest DM's state."
+              },
+              "at": {
+                "type": "string",
+                "description": "next: about when the next digest is due; else when the digest DM last changed."
+              },
+              "error": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "description": "The alert digest this item is (or will be) part of; null when alerts are not in digest mode and no digest named it."
           }
         }
       },
@@ -1772,7 +1809,7 @@
     {
       "id": "alerts_get",
       "title": "Read alert settings",
-      "description": "The owner alert setting: off (default), a Buzz DM, or a channel DM through Connect; for a channel DM, whether approvals carry Approve / Deny buttons.",
+      "description": "The owner alert setting: off (default), a Buzz DM, or a channel DM through Connect.",
       "input": {
         "type": "object",
         "additionalProperties": false,
@@ -1787,6 +1824,10 @@
           "buzzTo",
           "channelAccount",
           "channelPerson",
+          "delivery",
+          "digestEveryMin",
+          "quietHours",
+          "timeZone",
           "buttons"
         ],
         "properties": {
@@ -1819,6 +1860,56 @@
             ],
             "maxLength": 400
           },
+          "delivery": {
+            "type": "string",
+            "enum": [
+              "each",
+              "digest"
+            ],
+            "description": "each: one DM per new item (default). digest: one DM per window with the count and the titles."
+          },
+          "digestEveryMin": {
+            "type": "integer",
+            "enum": [
+              60,
+              180,
+              720,
+              1440
+            ],
+            "description": "Digest window in minutes (default 60). Used only with delivery digest."
+          },
+          "quietHours": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": false,
+            "required": [
+              "start",
+              "end"
+            ],
+            "properties": {
+              "start": {
+                "type": "string",
+                "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
+                "description": "Local time HH:MM (24 h) when quiet starts."
+              },
+              "end": {
+                "type": "string",
+                "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
+                "description": "Local time HH:MM when quiet ends; may be after midnight."
+              }
+            },
+            "description": "No alert DM is sent in this daily window (in timeZone); alerts wait until it ends. null = off (default)."
+          },
+          "timeZone": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 64,
+            "description": "IANA time zone of the owner (e.g. Europe/Berlin). Required when quietHours is set."
+          },
           "buttons": {
             "type": "boolean"
           }
@@ -1835,7 +1926,7 @@
     {
       "id": "alerts_set",
       "title": "Change alert settings",
-      "description": "Turn the owner alert DM on or off. The DM goes out through Connect. Only the first DM to a new person waits for the owner's approval (unless the owner turned on approval for every message).",
+      "description": "Turn the owner alert DM on or off. The DM goes out through Connect. Only the first DM to a new person waits for the owner's approval (unless the owner turned on approval for every message). Optional: a digest instead of one DM per item, and quiet hours in the owner's time zone.",
       "input": {
         "type": "object",
         "additionalProperties": false,
@@ -1872,6 +1963,56 @@
             ],
             "maxLength": 400
           },
+          "delivery": {
+            "type": "string",
+            "enum": [
+              "each",
+              "digest"
+            ],
+            "description": "each: one DM per new item (default). digest: one DM per window with the count and the titles."
+          },
+          "digestEveryMin": {
+            "type": "integer",
+            "enum": [
+              60,
+              180,
+              720,
+              1440
+            ],
+            "description": "Digest window in minutes (default 60). Used only with delivery digest."
+          },
+          "quietHours": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": false,
+            "required": [
+              "start",
+              "end"
+            ],
+            "properties": {
+              "start": {
+                "type": "string",
+                "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
+                "description": "Local time HH:MM (24 h) when quiet starts."
+              },
+              "end": {
+                "type": "string",
+                "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
+                "description": "Local time HH:MM when quiet ends; may be after midnight."
+              }
+            },
+            "description": "No alert DM is sent in this daily window (in timeZone); alerts wait until it ends. null = off (default)."
+          },
+          "timeZone": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 64,
+            "description": "IANA time zone of the owner (e.g. Europe/Berlin). Required when quietHours is set."
+          },
           "buttons": {
             "type": "boolean",
             "description": "Decide approvals from the alert: Approve / Deny buttons in a Slack or Telegram DM, ✅ / ❌ reactions on a Buzz DM. Only approvals that may be decided from the chat. Off by default."
@@ -1886,6 +2027,10 @@
           "buzzTo",
           "channelAccount",
           "channelPerson",
+          "delivery",
+          "digestEveryMin",
+          "quietHours",
+          "timeZone",
           "buttons"
         ],
         "properties": {
@@ -1917,6 +2062,56 @@
               "null"
             ],
             "maxLength": 400
+          },
+          "delivery": {
+            "type": "string",
+            "enum": [
+              "each",
+              "digest"
+            ],
+            "description": "each: one DM per new item (default). digest: one DM per window with the count and the titles."
+          },
+          "digestEveryMin": {
+            "type": "integer",
+            "enum": [
+              60,
+              180,
+              720,
+              1440
+            ],
+            "description": "Digest window in minutes (default 60). Used only with delivery digest."
+          },
+          "quietHours": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": false,
+            "required": [
+              "start",
+              "end"
+            ],
+            "properties": {
+              "start": {
+                "type": "string",
+                "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
+                "description": "Local time HH:MM (24 h) when quiet starts."
+              },
+              "end": {
+                "type": "string",
+                "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
+                "description": "Local time HH:MM when quiet ends; may be after midnight."
+              }
+            },
+            "description": "No alert DM is sent in this daily window (in timeZone); alerts wait until it ends. null = off (default)."
+          },
+          "timeZone": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 64,
+            "description": "IANA time zone of the owner (e.g. Europe/Berlin). Required when quietHours is set."
           },
           "buttons": {
             "type": "boolean"

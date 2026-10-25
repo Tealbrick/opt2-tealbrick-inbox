@@ -44,6 +44,10 @@ const ALERT_ERRORS: Record<string, string> = {
   no_sender_identity: "open Connect, Senders, and choose the workspace sender for app messages",
   no_grant: "Connect is not in this workspace",
   denied: "you denied it in Connect",
+  quiet_hours: "waits for your quiet hours to end",
+  closed: "the item was answered or expired before it was sent",
+  alerts_off: "you turned alerts off",
+  alerts_changed: "you changed the alert settings",
 };
 const SNOOZE: { value: string; label: string; ms: number }[] = [
   { value: "1h", label: "1 hour", ms: 3600_000 },
@@ -272,6 +276,20 @@ function Detail({ id, onChanged }: { id: string; onChanged: () => void }) {
           {item.deliveries
             .map((d) => `${d.channel === "buzz" ? "Buzz DM" : "channel DM"} ${d.status === "held" ? "waits for your approval in Connect" : d.status}${d.error ? ` (${ALERT_ERRORS[d.error] ?? d.error})` : ""}`)
             .join("; ")}
+        </p>
+      ) : null}
+      {item.digest ? (
+        <p className="tb-hint">
+          Alert:{" "}
+          {item.digest.status === "next"
+            ? `in the next digest (about ${whenShort(item.digest.at)})`
+            : item.digest.status === "sent"
+              ? `sent in the digest ${ago(item.digest.at)}`
+              : item.digest.status === "held"
+                ? "the digest waits for your approval in Connect"
+                : item.digest.status === "pending"
+                  ? `the digest is being sent${item.digest.error ? ` (${ALERT_ERRORS[item.digest.error] ?? item.digest.error})` : ""}`
+                  : `the digest failed${item.digest.error ? ` (${ALERT_ERRORS[item.digest.error] ?? item.digest.error})` : ""}`}
         </p>
       ) : null}
     </article>
