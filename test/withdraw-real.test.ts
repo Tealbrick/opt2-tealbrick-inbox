@@ -12,8 +12,7 @@ import { fileURLToPath } from "node:url";
 import { type AppClient, appEnv, createFakeBridge, type FakeBridge, type PersonSession, TEST_ROOTS_ENV } from "@opt2-tealbrick/conformance";
 import { ulid } from "@opt2-tealbrick/manifest";
 import { defineApp, type Json, startApp } from "@opt2-tealbrick/miniapp-sdk";
-import start from "../conformance.start.ts";
-import { definition, manifest } from "../src/app.ts";
+import start, { harnessDefinition, servedManifest } from "../conformance.start.ts";
 
 type Running = { url: string; stop(): Promise<void> };
 type Answer = { status: number; code: string | null; body: unknown };
@@ -44,7 +43,7 @@ async function cleanup(): Promise<void> {
 after(cleanup);
 
 async function newBridge(): Promise<FakeBridge> {
-  const bridge = await createFakeBridge({ manifest });
+  const bridge = await createFakeBridge({ manifest: servedManifest });
   started.bridges.push(bridge);
   await bridge.control.publishKeySet();
   return bridge;
@@ -263,9 +262,11 @@ describe("upgrade from a 0.2.9 database through the real SDK migrations", () => 
     const base = envFor(bridge, dir); // one KEK for both boots: the instance key sealed by the first boot opens in the second
     const env = { TB_DATA_EPHEMERAL: "1", ...base };
     const harness = { portalRootKeys: bridge.testRootJwks(), port: 0 } as Parameters<typeof startApp>[2];
-    const v1 = await startApp(defineApp({ ...definition, migrations: old }), env, harness);
+    const v1 = await startApp(defineApp({ ...harnessDefinition, migrations: old }), env, harness);
     started.apps.push({ url: "", stop: () => v1.stop() });
     await bridge.control.waitForClaim(30_000);
+    // claimed AND running: the claim record is on disk before the stop (else the next boot re-enrols: code_invalid)
+    await bridge.control.waitForSliceRevision(1, 30_000);
     await v1.stop().catch(() => {});
 
     // 2. old rows, written as 0.2.9 wrote them (no product, no withdraw columns)

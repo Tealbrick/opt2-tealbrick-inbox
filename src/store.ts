@@ -1,8 +1,8 @@
 // Inbox domain over the app's own tables (migrations/0001_init.sql). Plain functions over the SDK's Db with an
 // explicit `now`, so handlers stay thin and tests drive them directly. Every state change is one transaction and is
 // guarded in SQL (`WHERE status = 'open' …`, changes === 1): a duplicate, stale or expired answer fails closed.
-import { isValidLaunchPath, ulid } from "@opt2-tealbrick/manifest";
-import { type Db, TbError } from "@opt2-tealbrick/miniapp-sdk";
+import { EVENT_SUMMARY_MAX, isValidLaunchPath, ulid } from "@opt2-tealbrick/manifest";
+import { type Db, type OpContext, TbError } from "@opt2-tealbrick/miniapp-sdk";
 
 export const KINDS = ["approval", "question"] as const;
 export const RESPONSES = ["approve", "deny", "answer", "clarify"] as const;
@@ -152,6 +152,37 @@ function toSummary(r: Row, now: number): ItemSummary {
 
 const SELECT = `SELECT i.*, d.response AS response FROM inbox_items i LEFT JOIN inbox_decisions d ON d.item_id = i.id`;
 
+// ── app event `inbox.item.answered` (C274 S4; manifest `events`, MANIFEST §16, SDK-API §20) ──
+
+/** `ctx.emit` as the SDK hands it over: one synchronous outbox row on the SAME connection, so it shares the transaction's fate. */
+export type Emit = NonNullable<OpContext["emit"]>;
+export const ANSWERED_EVENT = "item.answered";
+/** The SDK accepts only real agent ids in `to` (its own rule, not exported); anything else (never seen from a verified grant) gets no event. */
+const AGENT_ID = /^agt_[0-9A-HJKMNP-TV-Z]{26}$/;
+
+/**
+ * Wakes the agent that asked: `to` = the asker when it is an AGENT (app askers get no events in v1; a person never asks).
+ * Payload = ids and enums only (`inbox_status` shows the answer and the message); the summary is the item title the asker wrote,
+ * marked untrusted. Runs inside the caller's transaction: a rollback drops the outbox row with the change. `key` is for the
+ * conformance probe only; production leaves it to the SDK (a new ULID per emit).
+ */
+export function emitAnswered(emit: Emit | undefined, r: Row, status: "answered" | "expired", response: Response | null, key?: string): boolean {
+  if (emit === undefined || r.from_type !== "agent" || !AGENT_ID.test(String(r.from_id))) return false;
+  const title = String(r.title);
+  emit(
+    ANSWERED_EVENT,
+    { itemKind: String(r.kind), status, response },
+    {
+      subject: { kind: "inbox_item", id: String(r.id) },
+      to: [String(r.from_id) as `agt_${string}`],
+      summary: title.length > EVENT_SUMMARY_MAX ? `${title.slice(0, EVENT_SUMMARY_MAX - 1)}…` : title,
+      untrusted: true,
+      ...(key === undefined ? {} : { key }),
+    },
+  );
+  return true;
+}
+
 function row(db: Db, id: string): Row | undefined {
   return db.prepare(`${SELECT} WHERE i.id = ?`).get(id);
 }
@@ -170,9 +201,18 @@ export function nextWake(db: Db, now: number): number | null {
   return r?.t === null || r?.t === undefined ? null : Number(r.t);
 }
 
-/** Expires every open item whose time has passed (lazy sweep, run at the start of each op). */
-export function expireDue(db: Db, now: number): number {
-  return Number(db.prepare("UPDATE inbox_items SET status = 'expired', updated_at = ? WHERE status = 'open' AND expires_at <= ?").run(now, now).changes);
+/**
+ * Expires every open item whose time has passed (the sweep at the start of each op and in the background tick). With `emit`,
+ * each expired item an agent asked gets `item.answered` (status expired) in the SAME transaction as the expiry write. A withdraw
+ * also sets `expired`, but not through here: the asker caused it, so it gets no event.
+ */
+export function expireDue(db: Db, now: number, emit?: Emit): number {
+  return db.transaction(() => {
+    const due = emit === undefined ? [] : db.prepare("SELECT id, kind, title, from_type, from_id FROM inbox_items WHERE status = 'open' AND expires_at <= ? AND from_type = 'agent'").all(now);
+    const n = Number(db.prepare("UPDATE inbox_items SET status = 'expired', updated_at = ? WHERE status = 'open' AND expires_at <= ?").run(now, now).changes);
+    for (const r of due) emitAnswered(emit, r, "expired", null);
+    return n;
+  });
 }
 
 /** IN-2: kind and declared family of an item (undefined: no such item). */
@@ -573,9 +613,10 @@ export interface DecideInput {
  * The owner's answer. Fails closed, in this order: unknown item (404), expired (409 item_expired), already answered
  * (409 already_decided), the owner saw an older version (409 stale_version), a response the item does not allow
  * (409 response_not_allowed), answer/clarify without words (400 message_required). One transaction; the guarded
- * UPDATE (status open + same version) is the real duplicate guard.
+ * UPDATE (status open + same version) is the real duplicate guard. With `emit`, an agent's item gets `item.answered` in the same
+ * transaction (a refused or rolled-back decide emits nothing).
  */
-export function decide(db: Db, input: DecideInput, decidedBy: string, now: number): { itemId: string; status: Status; response: Response; decidedAt: string } {
+export function decide(db: Db, input: DecideInput, decidedBy: string, now: number, emit?: Emit, eventKey?: string): { itemId: string; status: Status; response: Response; decidedAt: string } {
   return db.transaction(() => {
     const r = row(db, input.itemId);
     if (!r) notFound();
@@ -604,6 +645,8 @@ export function decide(db: Db, input: DecideInput, decidedBy: string, now: numbe
     );
     if (message)
       db.prepare("INSERT INTO inbox_messages (id, item_id, author, author_id, body, created_at) VALUES (?, ?, 'owner', ?, ?, ?)").run(`msg_${ulid(now)}`, input.itemId, decidedBy, message, now);
+    // C274 S4: one event per decision, in this transaction (every decide path comes here: Portal/TBM item_decide, chat buttons)
+    emitAnswered(emit, r, "answered", input.response, eventKey);
     return { itemId: input.itemId, status: "answered" as const, response: input.response, decidedAt: iso(now) };
   });
 }

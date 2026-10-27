@@ -3,9 +3,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { Json, TbError } from "@opt2-tealbrick/miniapp-sdk";
 import { BUTTONS_LINE, BUZZ_REACT_LINE, INBOX_ONLY_LINE } from "../src/alerts.ts";
-import { clock, handlers, tick } from "../src/app.ts";
+import { clock, handlers, manifest, tick } from "../src/app.ts";
 import { MAX_BAD_MACS, TOKEN_TTL_MS } from "../src/dm.ts";
-import { AGENT, type CallApp, ctxFor, memoryDb, OWNER, type Sent, secretsFor } from "./helpers.ts";
+import { AGENT, type CallApp, ctxFor, memoryDb, OWNER, recordingOutbox, type Sent, secretsFor } from "./helpers.ts";
 
 const h = handlers as any;
 const code = (c: string) => (e: unknown) => (e as TbError).code === c;
@@ -406,4 +406,34 @@ test("Buzz: buttons off → plain alert; money / no family → Inbox only; the t
   assert.equal(plain.actions, undefined);
   assert.match(String(plain.content), /Open Operator Inbox to answer\.$/u);
   assert.equal(plain.text, undefined);
+});
+
+test("C274 S4: a relayed ✅ (Buzz) and a Slack button each emit one item.answered to the asking agent; refused clicks emit nothing", async () => {
+  // Buzz reaction
+  const db = await buzzSetup();
+  const ob = recordingOutbox(db, manifest);
+  const c = fakeConnect(() => ({ status: "ok", output: { id: "e1", channel: "c1", to: NPUB, relays: [], actions: "shown" } }));
+  const asked = await h.inbox_ask.run({ kind: "approval", title: "Post?", family: "public_link" }, ctxFor(db, AGENT, c.callApp));
+  const values = ((c.sent[0] as Sent).input as { actions: Action[] }).actions.map((a) => a.value);
+  const buzz = (token: string, extra: Record<string, unknown> = {}) =>
+    h.item_decide_dm.run({ token, clicker: { service: "buzz", id: NPUB }, account: "buzz", ...extra }, ctxFor(db, CONNECT, undefined, { emit: ob.emit }));
+  await assert.rejects(buzz(values[0] as string, { clicker: { service: "buzz", id: `npub1${"z".repeat(58)}` } }), code("wrong_person"));
+  assert.equal(ob.rows().length, 0);
+  await buzz(values[1] as string);
+  assert.deepEqual(
+    ob.rows().map((e) => [e.name, e.opts.subject, e.opts.to, e.data]),
+    [["item.answered", { kind: "inbox_item", id: asked.itemId }, [AGENT.id], { itemKind: "approval", status: "answered", response: "deny" }]],
+  );
+  await assert.rejects(buzz(values[0] as string), code("token_used"));
+  assert.equal(ob.rows().length, 1, "the replayed click emits nothing");
+
+  // Slack button
+  const db2 = await setup();
+  const ob2 = recordingOutbox(db2, manifest);
+  const { itemId, actions } = await ask(db2);
+  await h.item_decide_dm.run({ token: actions[0]?.value, clicker: { service: "slack", id: OWNER_ID }, account: "slack" }, ctxFor(db2, CONNECT, undefined, { emit: ob2.emit }));
+  assert.deepEqual(
+    ob2.rows().map((e) => [e.opts.subject.id, e.data.response]),
+    [[itemId, "approve"]],
+  );
 });

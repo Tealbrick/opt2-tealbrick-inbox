@@ -6,8 +6,17 @@
 // refuses every slice whose key-set statement is not signed by a root it pins. Production never reads that variable.
 // Bridge mode on a plain CI disk (SDK 0.1.12 claim guard): the suite (conformance >= 0.1.8) boots the app with
 // TB_DATA_EPHEMERAL=1; this harness keeps that default for older suites. Never set it in a deploy recipe.
-import { startApp } from "@opt2-tealbrick/miniapp-sdk";
-import { app, manifest } from "./src/app.ts";
+// Events (C274 S4): the harness serves conformance.manifest.json = the shipped manifest + the conformance-only `events_probe`
+// person op (conformance.probe.ts), the op the A-EV rows drive (tealbrick-conformance.json eventsProbe).
+import { defineApp, startApp } from "@opt2-tealbrick/miniapp-sdk";
+import { PROBE_OP, probeHandler, probeManifest } from "./conformance.probe.ts";
+import { definition, manifest } from "./src/app.ts";
+
+/** The manifest this harness serves (a fake bridge in a test must be built on the same one, or the claim is manifest_mismatch). */
+export const servedManifest = probeManifest(manifest);
+/** The app definition this harness serves: the shipped one plus the probe op. */
+export const harnessDefinition: typeof definition = { ...definition, manifest: servedManifest, handlers: { ...definition.handlers, [PROBE_OP]: probeHandler } };
+const app = defineApp(harnessDefinition);
 
 export default async function start(env: Record<string, string>): Promise<{ url: string; stop(): Promise<void>; backupNow(): Promise<void> }> {
   // Port: the suite's free port (TBCONF_PORT, conformance >= 0.1.13), else manifest runtime.port.

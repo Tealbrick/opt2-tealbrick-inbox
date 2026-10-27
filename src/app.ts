@@ -59,16 +59,25 @@ function op<I, O>(spec: HandlerSpec<I, O>): HandlerSpec {
   return spec as unknown as HandlerSpec;
 }
 
+/**
+ * C274 S4: the emit of the start context (no call, so no `causedBy`), kept for the expiry sweep. An item expires because its
+ * time passed, not because of whoever's op ran the sweep: with the op's own `ctx.emit` an agent that happened to call would be
+ * the event's cause, and the bridge never wakes the cause, so the asker could miss its own expiry. Same outbox, same connection.
+ * Keyed by the app's Db handle (the SDK hands the SAME handle to op and start contexts), so several apps in one test process
+ * never share one.
+ */
+const sweepEmits = new WeakMap<object, store.Emit>();
+
 /** Every op starts with the lazy expiry and snooze sweeps, so no handler ever reads an item past its time as open. */
 function begin(ctx: OpContext): number {
   const now = clock.now();
-  if (store.expireDue(ctx.db, now) + store.wakeDue(ctx.db, now) > 0) ctx.statusChanged();
+  if (store.expireDue(ctx.db, now, sweepEmits.get(ctx.db) ?? ctx.emit) + store.wakeDue(ctx.db, now) > 0) ctx.statusChanged();
   return now;
 }
 
 /** Background tick (C85 app-initiated calls): expiry and snooze sweeps (badge), due alert sends, the alert digest (C263). */
 export const TICK_MS = 60_000;
-type TickCtx = Pick<StartContext, "db" | "log" | "callApp" | "statusChanged"> & Partial<Pick<StartContext, "ownerLink">> & { secrets?: dm.Secrets };
+type TickCtx = Pick<StartContext, "db" | "log" | "callApp" | "statusChanged"> & Partial<Pick<StartContext, "ownerLink" | "emit">> & { secrets?: dm.Secrets };
 let wakeTimer: ReturnType<typeof setTimeout> | undefined;
 /**
  * C331(11): a snooze that ends between two ticks pushes the status at its end, not at the next tick or periodic report.
@@ -93,7 +102,7 @@ function armWake(ctx: TickCtx, now: number): void {
 }
 export async function tick(ctx: TickCtx, now = clock.now()): Promise<void> {
   try {
-    if (store.expireDue(ctx.db, now) + store.wakeDue(ctx.db, now) > 0) ctx.statusChanged();
+    if (store.expireDue(ctx.db, now, ctx.emit) + store.wakeDue(ctx.db, now) > 0) ctx.statusChanged();
     armWake(ctx, now);
     try {
       store.pruneActivity(ctx.db, now);
@@ -220,7 +229,7 @@ export const handlers = {
   [OP.itemDecide]: op<ItemDecideInput, ItemDecideOutput>({
     async run(input, ctx) {
       const who = owner(ctx);
-      const out = store.decide(ctx.db, input, who, begin(ctx));
+      const out = store.decide(ctx.db, input, who, begin(ctx), ctx.emit);
       ctx.statusChanged();
       return out;
     },
@@ -238,7 +247,7 @@ export const handlers = {
         throw new TbError("decide_in_inbox", "Decide this in Operator Inbox.", 403);
       const out = ctx.db.transaction(() => {
         if (!dm.consume(ctx.db, click.tokenId, click.by, now)) throw new TbError("token_used", "This was already decided from the chat.", 409);
-        return store.decide(ctx.db, { itemId: click.itemId, version: click.version, response: click.response }, click.by, now);
+        return store.decide(ctx.db, { itemId: click.itemId, version: click.version, response: click.response }, click.by, now, ctx.emit);
       });
       ctx.statusChanged();
       ctx.receipt.meta({ via: input.clicker.service, response: out.response });
@@ -304,6 +313,7 @@ export const definition: SdkAppDefinition = {
   // C86: open, unsnoozed items count in the TBD badge (held receipts + this)
   pendingCount: async (db) => store.waitingCount(db, clock.now()),
   async onStart(ctx) {
+    if (ctx.emit) sweepEmits.set(ctx.db, ctx.emit);
     await tick(ctx);
     setInterval(() => void tick(ctx), TICK_MS).unref();
   },
