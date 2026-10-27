@@ -282,7 +282,7 @@ export const handlers = {
       const now = begin(ctx);
       const c = ctx as SdkOpContext;
       return overview(
-        { manifest, companionTargets: () => c.companionTargets(), callApp: (p, o, i) => c.callApp(p, o, i), ownerLink: (p) => c.ownerLink(p), now },
+        { manifest, companionTargets: () => c.companionTargets(), callApp: (p, o, i) => c.callApp(p, o, i), ownerLink: (p) => c.ownerLink(p), ownerLinkFor: (p, path) => c.ownerLinkFor(p, path), now },
         store.openItems(ctx.db, now, 100),
       );
     },

@@ -203,9 +203,10 @@ test("holds_overview with consent: every target app's pending holds (summaries o
     "oldest first; malformed rows dropped",
   );
   const r1 = connect[0];
-  assert.deepEqual(Object.keys(r1).sort(), ["ageS", "caller", "createdAt", "decidePath", "family", "id", "op", "openUrl", "product", "reason", "summary"]);
+  assert.deepEqual(Object.keys(r1).sort(), ["ageS", "allowAlwaysUrl", "caller", "createdAt", "decidePath", "family", "id", "op", "openUrl", "product", "reason", "summary"]);
   assert.ok(!JSON.stringify(o).includes("secret") && !JSON.stringify(o).includes("payload"), "no payload passes through");
   assert.equal(r1.family, "first_contact");
+  assert.equal(r1.allowAlwaysUrl, null, "not a Rules hold: no Allow always link");
   assert.equal(r1.openUrl, `${PORTAL}/w/${WS}/open?product=connect&path=${encodeURIComponent(`/holds/${hid(1)}`)}`);
   assert.deepEqual(o.errors, [{ product: "kanban", code: "app_unavailable" }]);
   assert.equal(o.rows.at(-1).product, "inbox", "the Inbox item is the newest");

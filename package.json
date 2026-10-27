@@ -1,6 +1,6 @@
 {
   "name": "opt2-tealbrick-inbox",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "private": true,
   "description": "Operator Inbox: a Teal Brick opt2 miniapp.",
   "license": "Apache-2.0",

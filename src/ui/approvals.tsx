@@ -55,7 +55,18 @@ export function ApprovalsPage({ onOpenItem, itemHref }: { onOpenItem: (id: strin
                       ) : (
                         <span className="tb-hint">Open {name} from Portal to decide.</span>
                       )}
+                      {r.allowAlwaysUrl ? (
+                        // C277 A2 (RU-11): Rules holds only. The link is built by the server; Rules opens with a NEW allow rule, nothing is saved here.
+                        <ButtonLink variant="quiet" size="sm" href={r.allowAlwaysUrl} target="_blank" rel="noopener noreferrer" aria-describedby={`allow-hint-${r.id}`}>
+                          Allow always…
+                        </ButtonLink>
+                      ) : null}
                     </div>
+                    {r.allowAlwaysUrl ? (
+                      <p className="tb-hint" id={`allow-hint-${r.id}`}>
+                        Opens Rules with a new allow rule. Nothing changes until you save it there.
+                      </p>
+                    ) : null}
                   </div>
                 );
               })}
