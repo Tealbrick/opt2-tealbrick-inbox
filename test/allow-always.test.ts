@@ -134,3 +134,12 @@ test("holds_overview: no Portal origin yet (Rules not reachable) → no Allow al
   assert.equal(o.rows.length, 1);
   assert.equal(o.rows[0].allowAlwaysUrl, null);
 });
+
+test("rule: the Rules rule id from the end of the hold reason; absent or malformed → no rule param", () => {
+  const RUL = "rul_01M5XG0000000000000000R001";
+  assert.equal(asked(rulesHold({ reason: `Owner wants to see first-contact DMs (rule ${RUL})` }))?.query.get("rule"), RUL);
+  const all = asked(rulesHold({ reason: `x (rule ${RUL})`, tool: "send" }));
+  assert.deepEqual([...(all?.query.keys() ?? [])], ["new", "product", "op", "tool", "agent", "hold", "rule"]);
+  for (const reason of [undefined, null, 7, "", "no rule here", `(rule ${RUL}) not at the end`, "x (rule rul_short)", `x (rule ${RUL.toLowerCase()})`, `x (rule ${RUL}&agent=agt_x)`])
+    assert.equal(asked(rulesHold({ reason }))?.query.has("rule"), false, String(reason));
+});

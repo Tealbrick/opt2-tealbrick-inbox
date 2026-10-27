@@ -80,16 +80,19 @@ export const RULES_GATE = "rules/rules_gate";
 const AGENT_ID = /^agt_[0-9A-Za-z]{1,64}$/;
 const PRODUCT_ID = /^[a-z][a-z0-9-]{1,31}$/;
 const TOOL = /^[\x21-\x7e]{1,128}$/;
+/** The Rules hold reason ends with "(rule rul_<ULID>)": the rule that held the call (Rules lead, Rules dev.6 reads `rule`). */
+const RULE_IN_REASON = /\(rule (rul_[0-9A-HJKMNP-TV-Z]{26})\)$/;
 
 /**
  * "Allow always…" (C277 A2, RU-11): for a hold that Rules made (family `policy`, heldBy `rules/rules_gate`) the Portal link
- * that opens Rules at "new allow rule" with the hold's app, op and caller prefilled. Inbox decides and saves nothing; the
+ * that opens Rules at "new allow rule" with the hold's app, op and caller prefilled (and `rule` = the Rules rule that held
+ * the call, parsed from the end of the hold reason, when present). Inbox decides and saves nothing; the
  * owner reviews and saves the rule in Rules. Returns null for every other hold, for an app caller without a verified
  * product or an agent id that is not well formed (a rule must never be prefilled wider than the hold), and when Rules is
  * not installed (ownerLinkFor answers null) or refuses the path.
  */
 export function allowAlwaysLink(
-  h: Pick<HoldsPendingItem, "id" | "op" | "family" | "heldBy" | "caller"> & { tool?: unknown },
+  h: Pick<HoldsPendingItem, "id" | "op" | "family" | "heldBy" | "caller"> & { tool?: unknown; reason?: unknown },
   product: string,
   ownerLinkFor: OverviewDeps["ownerLinkFor"],
 ): string | null {
@@ -106,6 +109,8 @@ export function allowAlwaysLink(
     q.set("callerProduct", cp);
   } else return null;
   if (typeof h.id === "string" && HOLD_ID.test(h.id)) q.set("hold", h.id);
+  const rule = typeof h.reason === "string" ? RULE_IN_REASON.exec(h.reason)?.[1] : undefined;
+  if (rule) q.set("rule", rule);
   try {
     return ownerLinkFor(RULES, `/?${q.toString()}`);
   } catch {
