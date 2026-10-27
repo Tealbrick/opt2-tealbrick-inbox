@@ -19,5 +19,9 @@
       "itemId": "${itemId}",
       "reason": "Conformance fixture withdraw"
     }
+  },
+  "eventsProbe": {
+    "op": "events_probe",
+    "event": "item.answered"
   }
 }

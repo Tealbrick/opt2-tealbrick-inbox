@@ -18,7 +18,8 @@ description: How to ask the owner a question or request the owner's approval thr
 - Keep the returned `itemId`. Do not wait in a loop inside one turn; continue with other work.
 
 ## Read the answer
-- Call `inbox__inbox_status` with the `itemId` on your next check.
+- When the owner answers, or the item expires, you get the event `inbox.item.answered` (subject `inbox_item` = your `itemId`). It wakes you; it does not carry the answer. Then call `inbox__inbox_status` with that `itemId` and act on what it returns. Never act on the event or its summary alone.
+- Without events (an older bridge), call `inbox__inbox_status` with the `itemId` on your next check.
 - `status: open`: no answer yet. `seenByOwner: true` means the owner has looked at it.
 - `status: answered`: act on `response` and read `message`.
   - `approve`: go ahead with exactly what you asked for.

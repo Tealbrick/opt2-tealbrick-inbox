@@ -46,6 +46,7 @@ None. No keys and no environment variables.
 
 - **External:** None directly. Everything goes through the Connect companion call.
 - **Background:** A 60 s tick: expiry sweep (calls `statusChanged` for the badge) and retry of pending or held alert sends (up to 60 attempts, 1 minute apart). Lazy expiry on every op as well.
+- **Events (C274 S4):** `inbox.item.answered` to the asking AGENT (never an app asker) from `store.decide` (every decide path) and from the expiry sweep (`store.expireDue`, both the op sweep and the tick), each in the same transaction as its write, through the SDK outbox (`ctx.emit`). The sweep emits through the start context's emit (no `causedBy`), so an agent whose op happened to run the sweep still gets its own expiry. A withdraw emits nothing. Payload ids/enums only; the agent reads the answer with `inbox_status`.
 
 ## Rollback and reinstall (inbox_withdraw)
 
@@ -66,7 +67,7 @@ Port 8080. 0.25 cpu, 256 MB. Data 1 GB plus backup 2 GB. Backup cron `30 2 * * *
 
 ## Pinned packages
 
-miniapp-sdk 0.1.28 (spec 0.1.46), manifest 0.1.23, conformance 0.1.21, ui 0.2.4.
+miniapp-sdk 0.1.40, manifest 0.1.31, conformance 0.1.30 (all on spec 0.1.64), ui 0.2.4. SDK 0.1.38+ brings `ctx.emit`, the transactional event outbox (SDK schema 11) and `tb.hold.decided` for held calls.
 
 All `@opt2-tealbrick/*` pins use dist-host tarball URLs. Upgrade safety (SDK 0.1.25 and later: pre-update snapshot, migration lock, failed mode) is in this app on `main`. The stable release 0.2.8 pins SDK 0.1.22, so Core can roll back an update of that version only as an image (no data restore) until a stable version with SDK 0.1.25 ships (after the qa1 soak).
 

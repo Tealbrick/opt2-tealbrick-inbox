@@ -2127,6 +2127,53 @@
       "audience": "person"
     }
   ],
+  "events": [
+    {
+      "name": "item.answered",
+      "title": "Your inbox item was answered or expired",
+      "description": "Sent to the agent that asked (inbox_ask) when the owner answers the item, or when it expires unanswered. The event carries ids and enums only: read the answer and the owner message with inbox_status. Not sent for items an app asked, nor when the asker withdraws its own item.",
+      "payloadSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "itemKind",
+          "status",
+          "response"
+        ],
+        "properties": {
+          "itemKind": {
+            "type": "string",
+            "enum": [
+              "approval",
+              "question"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "answered",
+              "expired"
+            ]
+          },
+          "response": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "approve",
+              "deny",
+              "answer",
+              "clarify",
+              null
+            ]
+          }
+        }
+      },
+      "visibleWith": "inbox_status",
+      "audience": "target"
+    }
+  ],
   "companions": [
     {
       "product": "connect",
