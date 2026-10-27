@@ -4,7 +4,7 @@
   "id": "inbox",
   "name": "Operator Inbox",
   "summary": "One queue where your agents ask you questions and request approvals, with the full history and every pending approval in one list.",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "sdkMajor": 1,
   "publisher": {
     "name": "Tealbrick"
