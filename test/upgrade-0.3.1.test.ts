@@ -7,7 +7,7 @@
 // the real SDK on 0001 + 0002, then takes the SDK part back to schema 6 (drops exactly what SDK migrations 7..11 add), writes
 // rows the way 0.3.1 wrote them, and boots this release on the same data dir: SDK 7..11 and app 0003..0005 run.
 import assert from "node:assert/strict";
-import { cpSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -67,6 +67,8 @@ describe("upgrade from an inbox 0.3.1 data dir (app 0001-0002, SDK schema 6)", (
     // 1. the 0.3.1 app migrations only
     const old = tmp("migrations-031");
     mkdirSync(old, { recursive: true });
+    // CI runs as root: startApp drops to uid 1000 (C53) before it reads the migrations, and mkdtemp makes the dir 0700
+    chmodSync(old, 0o755);
     for (const f of ["0001_init.sql", "0002_withdraw.sql"]) cpSync(fileURLToPath(new URL(`../migrations/${f}`, import.meta.url)), join(old, f));
     const v031 = await startApp(defineApp({ ...harnessDefinition, migrations: old }), { TB_DATA_EPHEMERAL: "1", ...env }, {
       portalRootKeys: bridge.testRootJwks(),
