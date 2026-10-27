@@ -359,6 +359,27 @@ describe("All approvals", () => {
     await m.unmount();
   });
 
+  it("C277 A2 (RU-11): a Rules hold shows Allow always… (server-built link, new tab) and the hint; other rows show neither; nothing is sent", async () => {
+    const allow = "https://portal.example.test/w/ws/open?product=rules&path=%2F%3Fnew%3Dallow%26product%3Dconnect%26op%3Ddm_send%26agent%3Dagt_1%26hold%3Dhld_2";
+    const rows = overview.rows.map((r, i) => ({ ...r, allowAlwaysUrl: i === 2 ? allow : null }));
+    reset({ holds_overview: { ...overview, rows } });
+    const m = await mount(h(pages.ApprovalsPage, { onOpenItem: () => {}, itemHref: (id: string) => `items/${id}` }));
+    const items = [...m.host.querySelectorAll(".item")];
+    const allowLinks = [...m.host.querySelectorAll("a")].filter((a) => a.textContent?.trim() === "Allow always…");
+    assert.equal(allowLinks.length, 1, "only the Rules hold");
+    const link = allowLinks[0] as HTMLAnchorElement;
+    assert.equal(link.getAttribute("href"), allow);
+    assert.equal(link.getAttribute("target"), "_blank");
+    assert.match(link.getAttribute("rel") ?? "", /noopener/);
+    assert.ok(items[2]?.contains(link), "inside the Rules hold's row");
+    const hint = items[2]?.querySelector(`#${link.getAttribute("aria-describedby")}`);
+    assert.equal(hint?.textContent, "Opens Rules with a new allow rule. Nothing changes until you save it there.");
+    assert.equal(m.host.textContent?.split("Opens Rules with a new allow rule.").length, 2, "one hint");
+    assert.ok(!items[0]?.textContent?.includes("Allow always") && !items[1]?.textContent?.includes("Allow always"));
+    assert.deepEqual(stub.calls.map((c) => c.op), ["holds_overview"], "reading the list is the only call; nothing decided or saved");
+    await m.unmount();
+  });
+
   it("RUL-14: a failed load is an alert with Try again", async () => {
     reset();
     stub.fail.holds_overview = { status: 500, code: "internal_error" };

@@ -4,7 +4,7 @@
   "id": "inbox",
   "name": "Operator Inbox",
   "summary": "One queue where your agents ask you questions and request approvals, with the full history and every pending approval in one list.",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "sdkMajor": 1,
   "publisher": {
     "name": "Tealbrick"
@@ -1705,7 +1705,8 @@
                 "createdAt",
                 "ageS",
                 "decidePath",
-                "openUrl"
+                "openUrl",
+                "allowAlwaysUrl"
               ],
               "properties": {
                 "product": {
@@ -1773,6 +1774,13 @@
                     "null"
                   ],
                   "description": "Portal link that opens the owning app at decidePath (null until the workspace slice names Portal)."
+                },
+                "allowAlwaysUrl": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Rules holds only: Portal link that opens Rules with a new allow rule prefilled (Inbox saves nothing); null otherwise or when Rules is not installed."
                 }
               }
             }

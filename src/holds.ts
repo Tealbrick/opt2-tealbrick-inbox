@@ -27,6 +27,8 @@ export interface OverviewRow {
   ageS: number;
   decidePath: string;
   openUrl: string | null;
+  /** C277 A2 (RU-11): Rules hold only: the Portal link that opens Rules with a NEW allow rule prefilled; null for every other row. */
+  allowAlwaysUrl: string | null;
 }
 
 export interface Overview {
@@ -41,6 +43,8 @@ export interface OverviewDeps {
   companionTargets(): string[];
   callApp(product: string, op: string, input: Json): Promise<unknown>;
   ownerLink(path: string): string | null;
+  /** ctx.ownerLinkFor: the Portal link to `path` in another app; null when that app is not installed; may throw on a bad product or path */
+  ownerLinkFor(product: string, path: string): string | null;
   now: number;
 }
 
@@ -68,6 +72,47 @@ export function linkFor(ownerLink: (path: string) => string | null, product: str
   return url.toString();
 }
 
+const HOLD_ID = /^hld_[0-9A-HJKMNP-TV-Z]{26}$/;
+
+export const RULES = "rules";
+/** `heldBy` of a hold that the Rules app's before hook made (`<product>/<hookId>`, SDK receipts; C277 A2). */
+export const RULES_GATE = "rules/rules_gate";
+const AGENT_ID = /^agt_[0-9A-Za-z]{1,64}$/;
+const PRODUCT_ID = /^[a-z][a-z0-9-]{1,31}$/;
+const TOOL = /^[\x21-\x7e]{1,128}$/;
+
+/**
+ * "Allow always…" (C277 A2, RU-11): for a hold that Rules made (family `policy`, heldBy `rules/rules_gate`) the Portal link
+ * that opens Rules at "new allow rule" with the hold's app, op and caller prefilled. Inbox decides and saves nothing; the
+ * owner reviews and saves the rule in Rules. Returns null for every other hold, for an app caller without a verified
+ * product or an agent id that is not well formed (a rule must never be prefilled wider than the hold), and when Rules is
+ * not installed (ownerLinkFor answers null) or refuses the path.
+ */
+export function allowAlwaysLink(
+  h: Pick<HoldsPendingItem, "id" | "op" | "family" | "heldBy" | "caller"> & { tool?: unknown },
+  product: string,
+  ownerLinkFor: OverviewDeps["ownerLinkFor"],
+): string | null {
+  if (h.family !== "policy" || h.heldBy !== RULES_GATE) return null;
+  if (!PRODUCT_ID.test(product) || typeof h.op !== "string" || h.op === "" || h.op.length > 64) return null;
+  const q = new URLSearchParams({ new: "allow", product, op: h.op });
+  if (typeof h.tool === "string" && TOOL.test(h.tool)) q.set("tool", h.tool);
+  if (h.caller?.type === "agent") {
+    if (typeof h.caller.id !== "string" || !AGENT_ID.test(h.caller.id)) return null;
+    q.set("agent", h.caller.id);
+  } else if (h.caller?.type === "app") {
+    const cp = h.caller.product as string | undefined;
+    if (typeof cp !== "string" || !PRODUCT_ID.test(cp)) return null;
+    q.set("callerProduct", cp);
+  } else return null;
+  if (typeof h.id === "string" && HOLD_ID.test(h.id)) q.set("hold", h.id);
+  try {
+    return ownerLinkFor(RULES, `/?${q.toString()}`);
+  } catch {
+    return null; // path_invalid / product_invalid: never link what the launch rule refuses
+  }
+}
+
 export function inboxRows(items: readonly ItemSummary[], deps: Pick<OverviewDeps, "ownerLink" | "now">): OverviewRow[] {
   return items.map((i) => ({
     product: SELF,
@@ -81,14 +126,14 @@ export function inboxRows(items: readonly ItemSummary[], deps: Pick<OverviewDeps
     ageS: Math.max(0, Math.floor((deps.now - Date.parse(i.createdAt)) / 1000)),
     decidePath: itemPath(i.id),
     openUrl: linkFor(deps.ownerLink, SELF, itemPath(i.id)),
+    allowAlwaysUrl: null,
   }));
 }
 
-const HOLD_ID = /^hld_[0-9A-HJKMNP-TV-Z]{26}$/;
 const text = (v: unknown, max: number): string | null => (typeof v === "string" ? v.slice(0, max) : null);
 
 /** Copies only the summary fields (never trusts the shape of another app's answer; no payload can pass through). */
-function rowOf(product: string, h: HoldsPendingItem, deps: Pick<OverviewDeps, "ownerLink" | "now">): OverviewRow | null {
+function rowOf(product: string, h: HoldsPendingItem, deps: Pick<OverviewDeps, "ownerLink" | "ownerLinkFor" | "now">): OverviewRow | null {
   if (!h || typeof h.id !== "string" || !HOLD_ID.test(h.id)) return null;
   const decidePath = `/holds/${h.id}`;
   const created = typeof h.createdAt === "string" && Number.isFinite(Date.parse(h.createdAt)) ? h.createdAt : new Date(deps.now).toISOString();
@@ -105,6 +150,7 @@ function rowOf(product: string, h: HoldsPendingItem, deps: Pick<OverviewDeps, "o
     ageS: Math.max(0, Math.floor((deps.now - Date.parse(created)) / 1000)),
     decidePath,
     openUrl: linkFor(deps.ownerLink, product, decidePath),
+    allowAlwaysUrl: allowAlwaysLink(h, product, deps.ownerLinkFor),
   };
 }
 
