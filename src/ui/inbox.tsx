@@ -3,9 +3,10 @@
 // started with a bare `void` that has no catch.
 import type { Json } from "@opt2-tealbrick/miniapp-sdk";
 import { callOp, TbError } from "@opt2-tealbrick/miniapp-sdk/client";
-import { Button, ButtonLink, EmptyState, Field, Notice, Select, type Status, Tabs, Tag, Textarea } from "@opt2-tealbrick/ui";
+import { accessFilter, Button, ButtonLink, EmptyState, Field, ListFilter, Notice, Select, type Status, Tabs, Tag, Textarea, useAccessFilter } from "@opt2-tealbrick/ui";
 import { type MouseEvent, useEffect, useRef, useState } from "react";
 import type { ItemGetOutput, ItemsListOutput } from "#kit";
+import { FILTER_FROM, filterKey } from "./filtering.ts";
 import { ago, day, errText, Head, LoadError, Loading, useOp, when, whenShort } from "./shared.tsx";
 
 type View = "pending" | "snoozed" | "done" | "all";
@@ -309,6 +310,34 @@ export function InboxPage({ selected, onSelect, onCounts, hrefOf }: { selected: 
   useEffect(() => {
     if (data) onCounts(data.counts.pending);
   }, [data, onCounts]);
+  const [query, setQuery] = useAccessFilter(filterKey("inbox"));
+  const textFilter = accessFilter(query);
+  // the list is paged (`nextCursor`): "Show more" appends the next page of the tab that is open
+  const [extra, setExtra] = useState<{ view: View; items: Summary[]; cursor: string | null } | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [moreError, setMoreError] = useState<string | null>(null);
+  const older = extra && extra.view === view ? extra : null;
+  const items = data ? [...data.items, ...(older?.items ?? []).filter((x) => !data.items.some((d) => d.id === x.id))] : [];
+  const next = older ? older.cursor : (data?.nextCursor ?? null);
+  const showMore = async () => {
+    if (!next || loadingMore) return;
+    setLoadingMore(true);
+    setMoreError(null);
+    try {
+      const page = await callOp<ItemsListOutput>("items_list", { view, limit: 100, cursor: next });
+      setExtra((e) => ({ view, items: [...(e && e.view === view ? e.items : []), ...page.items], cursor: page.nextCursor }));
+    } catch (e) {
+      setMoreError(errText(e));
+    } finally {
+      setLoadingMore(false);
+    }
+  };
+  const rows = items.filter((i) => textFilter.test([i.title, i.from.name, i.kind === "approval" ? "approval" : "question", PRIORITY_LABEL[i.priority], i.status === "answered" ? "answered" : i.status === "expired" ? (i.withdrawn ? "withdrawn" : "expired") : ""].join(" ")));
+  const filterOn = query.trim() !== "";
+  // items that wait for the owner (open, not snoozed) and the filter hides: told, so none is forgotten
+  const waits = (i: Summary) => i.status === "open" && !i.snoozedUntil;
+  const hiddenWaiting = items.filter(waits).length - rows.filter(waits).length;
+  const showBar = data !== null && (items.length >= FILTER_FROM || next !== null || filterOn);
   return (
     <section className="app-page" aria-label="Inbox">
       <Head title="Inbox" />
@@ -331,11 +360,40 @@ export function InboxPage({ selected, onSelect, onCounts, hrefOf }: { selected: 
           ) : data.items.length === 0 ? (
             <EmptyState title={EMPTY[view]}>{view === "pending" ? "Your agents’ questions and approval requests appear here." : undefined}</EmptyState>
           ) : (
-            <nav className="ruled" aria-label="Items">
-              {data.items.map((i) => (
-                <Row key={i.id} item={i} active={i.id === selected} href={hrefOf(i.id)} onOpen={() => onSelect(i.id)} />
-              ))}
-            </nav>
+            <>
+              {showBar ? (
+                <ListFilter
+                  label="Filter the items"
+                  value={query}
+                  onChange={setQuery}
+                  filter={textFilter}
+                  placeholder="Title, agent, or a regex"
+                  noun={{ one: "item", many: "items" }}
+                  shown={rows.length}
+                  total={items.length}
+                  more={next !== null}
+                  onClear={() => setQuery("")}
+                  onLoadMore={() => void showMore()}
+                  loadMoreLabel="Show more"
+                  loadingMore={loadingMore}
+                  hidden={hiddenWaiting}
+                  hiddenNoun={{ one: "item that waits for you", many: "items that wait for you" }}
+                />
+              ) : null}
+              <nav className="ruled" aria-label="Items">
+                {rows.map((i) => (
+                  <Row key={i.id} item={i} active={i.id === selected} href={hrefOf(i.id)} onOpen={() => onSelect(i.id)} />
+                ))}
+              </nav>
+              {moreError ? <LoadError message={moreError} onRetry={() => void showMore()} /> : null}
+              {next !== null ? (
+                <div>
+                  <Button onClick={() => void showMore()} disabled={loadingMore}>
+                    Show more
+                  </Button>
+                </div>
+              ) : null}
+            </>
           )}
         </div>
         <div>{selected ? <Detail key={selected} id={selected} onChanged={reload} /> : <EmptyState title="Select an item to read it and answer." />}</div>
