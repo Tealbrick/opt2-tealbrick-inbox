@@ -3,7 +3,7 @@
 import { AppIcon, accessFilter, appArt, appName, ButtonLink, EmptyState, ListFilter, Notice, useAccessFilter } from "@opt2-tealbrick/ui";
 import type { MouseEvent } from "react";
 import type { HoldsOverviewOutput } from "#kit";
-import { FILTER_FROM, filterKey } from "./filtering.ts";
+import { APP_ROWS_MOST, FILTER_FROM, filterKey, OWN_PRODUCT, OWN_ROWS_MOST } from "./filtering.ts";
 import { ago, Head, LoadError, Loading, useOp } from "./shared.tsx";
 
 /** Where scripts/build-ui.ts puts the stills (next to this module in the hashed asset directory, C61). */
@@ -15,8 +15,11 @@ export function ApprovalsPage({ onOpenItem, itemHref }: { onOpenItem: (id: strin
   const { data, error, reload } = useOp<HoldsOverviewOutput>("holds_overview", {}, 30_000);
   const [query, setQuery] = useAccessFilter(filterKey("approvals"));
   const textFilter = accessFilter(query);
-  // the overview reads every page of every app: this is the whole list, so a match is never "not loaded yet"
   const all = data?.rows ?? [];
+  // the overview reads at most 3 pages of 100 per app and 100 own open items, and does not say when it cut: a group at its cap may be cut
+  const perProduct = new Map<string, number>();
+  for (const r of all) perProduct.set(r.product, (perProduct.get(r.product) ?? 0) + 1);
+  const cut = [...perProduct].some(([product, n]) => n >= (product === OWN_PRODUCT ? OWN_ROWS_MOST : APP_ROWS_MOST));
   const rows = all.filter((r) => textFilter.test([r.summary, appName(r.product), r.caller.name, r.reason ?? r.op, r.op].join(" ")));
   const showBar = data !== null && (all.length >= FILTER_FROM || query.trim() !== "");
   return (
@@ -42,6 +45,7 @@ export function ApprovalsPage({ onOpenItem, itemHref }: { onOpenItem: (id: strin
                 noun={{ one: "approval", many: "approvals" }}
                 shown={rows.length}
                 total={all.length}
+                more={cut}
                 onClear={() => setQuery("")}
                 hidden={all.length - rows.length}
                 hiddenNoun={{ one: "approval that waits for you", many: "approvals that wait for you" }}

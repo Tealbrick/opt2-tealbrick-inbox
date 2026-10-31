@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { rmSync } from "node:fs";
 import { join } from "node:path";
-import { after, afterEach, before, describe, it } from "node:test";
+import { after, afterEach, before, describe, it, mock } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Window } from "happy-dom";
 import type { ReactElement } from "react";
@@ -61,7 +61,7 @@ const approval = (n: number) => ({
 });
 
 const PAGE = 100;
-const stub = { calls: [] as { op: string; input: Record<string, unknown> }[], items: [] as ReturnType<typeof item>[], approvals: [] as ReturnType<typeof approval>[] };
+const stub = { calls: [] as { op: string; input: Record<string, unknown> }[], items: [] as ReturnType<typeof item>[], allItems: [] as ReturnType<typeof item>[], approvals: [] as ReturnType<typeof approval>[] };
 const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
   const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url, "http://localhost");
@@ -75,8 +75,9 @@ globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) =>
   if (op === "items_list") {
     const from = inp.cursor ? Number(inp.cursor) : 0;
     const limit = Number(inp.limit ?? PAGE);
-    const out = stub.items.slice(from, from + limit);
-    return json(200, { status: "ok", output: { items: out, nextCursor: from + limit < stub.items.length ? String(from + limit) : null, counts: { pending: stub.items.length, snoozed: 0 } } });
+    const all = inp.view === "all" ? stub.allItems : stub.items;
+    const out = all.slice(from, from + limit);
+    return json(200, { status: "ok", output: { items: out, nextCursor: from + limit < all.length ? String(from + limit) : null, counts: { pending: stub.items.length, snoozed: 0 } } });
   }
   if (op === "holds_overview") return json(200, { status: "ok", output: { source: "all_apps", unavailable: null, rows: stub.approvals, errors: [] } });
   return json(404, { error: { code: "not_found", message: op } });
@@ -133,6 +134,7 @@ const reset = () => {
   localStorage.clear();
   stub.calls = [];
   stub.items = [];
+  stub.allItems = [];
   stub.approvals = [];
 };
 
@@ -230,6 +232,50 @@ describe("Inbox filter", () => {
   });
 });
 
+describe("Inbox paging stays consistent", () => {
+  it("a poll brings a new first page: the extra pages are read again from it, so no waiting item drops out", async () => {
+    reset();
+    mock.timers.enable({ apis: ["setInterval"] });
+    try {
+      stub.items = Array.from({ length: PAGE + 20 }, (_, i) => item(i));
+      const m = await inbox();
+      await click(buttons(m.host, "Show more")[0] as Element);
+      assert.equal(rowsOf(m.host).length, PAGE + 20);
+      // a new item arrives at the front meanwhile: every item moves down one place, so item 99 leaves the first page and the old extra page starts at 100
+      stub.items = [item(500), ...stub.items];
+      await act(async () => mock.timers.tick(15_000));
+      await flush();
+      const titles = [...rowsOf(m.host)].map((r) => r.querySelector("b")?.textContent);
+      assert.equal(titles.length, PAGE + 21);
+      assert.equal(new Set(titles).size, titles.length, "no item twice");
+      assert.ok(titles.includes("Item number 99"), "the item that moved from the first page to the second is not lost");
+      assert.ok(titles.includes("Item number 119") && titles.includes("Item number 500"));
+      assert.equal(buttons(m.host, "Show more").length, 0, "everything is loaded");
+    } finally {
+      mock.timers.reset();
+    }
+  });
+
+  it("switching the tab away and back drops the extra pages: Show more never sends the cursor of another tab", async () => {
+    reset();
+    stub.items = Array.from({ length: PAGE + 20 }, (_, i) => item(i));
+    stub.allItems = Array.from({ length: PAGE + 50 }, (_, i) => item(1000 + i));
+    const m = await inbox();
+    await click(buttons(m.host, "Show more")[0] as Element);
+    assert.equal(rowsOf(m.host).length, PAGE + 20);
+    await click([...m.host.querySelectorAll('[role="tab"]')].find((t) => t.textContent?.trim() === "All") as Element);
+    assert.equal(rowsOf(m.host).length, PAGE, "the All tab shows its own first page");
+    assert.ok([...rowsOf(m.host)].every((r) => /number 1\d{3}/.test(r.textContent ?? "")), "no row of the other tab");
+    await click(buttons(m.host, "Show more")[0] as Element);
+    assert.deepEqual(stub.calls.filter((c) => c.op === "items_list").at(-1)?.input, { view: "all", limit: PAGE, cursor: String(PAGE) });
+    await click([...m.host.querySelectorAll('[role="tab"]')].find((t) => t.textContent?.startsWith("Waiting")) as Element);
+    assert.equal(rowsOf(m.host).length, PAGE, "back on Waiting: the first page only");
+    await click(buttons(m.host, "Show more")[0] as Element);
+    assert.deepEqual(stub.calls.filter((c) => c.op === "items_list").at(-1)?.input, { view: "pending", limit: PAGE, cursor: String(PAGE) });
+    assert.equal(rowsOf(m.host).length, PAGE + 20);
+  });
+});
+
 describe("All approvals filter", () => {
   it("a short list shows no filter bar", async () => {
     reset();
@@ -254,6 +300,28 @@ describe("All approvals filter", () => {
     assert.equal(m.host.querySelectorAll(".item").length, 10);
     assert.doesNotMatch(text(m.host), /hidden by the filter/);
     await m.unmount();
+  });
+
+  it("a group at the cap of the overview may be cut: the bar says the list is not complete (300 rows of one app, 100 own items)", async () => {
+    reset();
+    stub.approvals = Array.from({ length: 300 }, (_, i) => ({ ...approval(i * 2 + 1), id: `hld_${i}` }));
+    remember("approvals", "zzz");
+    const m = await approvalsPage();
+    assert.match(text(m.host), /No loaded approval matches\./);
+    assert.match(text(m.host), /The filter searches only the 300 approvals loaded so far\./);
+    assert.doesNotMatch(text(m.host), /searched all/);
+    await m.unmount();
+    stub.approvals = Array.from({ length: 12 }, (_, i) => ({ ...approval(1), id: `itm_${i}`, product: "inbox", openUrl: null }));
+    const own = await approvalsPage();
+    assert.doesNotMatch(text(own.host), /loaded so far/, "12 own items: under the cap of 100");
+    await own.unmount();
+    stub.approvals = Array.from({ length: 100 }, (_, i) => ({ ...approval(1), id: `itm_${i}`, product: "inbox", openUrl: null }));
+    const cutOwn = await approvalsPage();
+    assert.match(text(cutOwn.host), /The filter searches only the 100 approvals loaded so far\./);
+    await cutOwn.unmount();
+    stub.approvals = [...Array.from({ length: 299 }, (_, i) => ({ ...approval(1), id: `hld_${i}` })), ...Array.from({ length: 99 }, (_, i) => ({ ...approval(2), id: `hld_c${i}`, product: "connect" }))];
+    const under = await approvalsPage();
+    assert.match(text(under.host), /No approval matches\. The filter searched all 398 approvals\./, "299 and 99 rows: no group is at its cap");
   });
 
   it("the app name is searched too, a remembered filter shows after a reload, no match says all approvals were searched", async () => {

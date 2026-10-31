@@ -306,26 +306,65 @@ const EMPTY: Record<View, string> = {
 
 export function InboxPage({ selected, onSelect, onCounts, hrefOf }: { selected: string | null; onSelect: (id: string) => void; onCounts: (n: number) => void; hrefOf: (id: string) => string }) {
   const [view, setView] = useState<View>("pending");
-  const { data, error, reload } = useOp<ItemsListOutput>("items_list", { view, limit: 100 }, 15_000);
+  const { data: answer, error, reload } = useOp<ItemsListOutput>("items_list", { view, limit: 100 }, 15_000);
+  // useOp keeps the last answer while another tab loads: tag every answer with the tab it was asked for, so a tab never shows the rows or the cursor of another
+  const [tagged, setTagged] = useState<{ view: View; data: ItemsListOutput } | null>(null);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a new answer is tagged with the tab that is open when it arrives; useOp drops answers of another tab
   useEffect(() => {
-    if (data) onCounts(data.counts.pending);
-  }, [data, onCounts]);
+    if (answer) setTagged({ view, data: answer });
+  }, [answer]);
+  const data = tagged && tagged.view === view ? tagged.data : null;
+  const counts = tagged?.data.counts ?? null;
+  useEffect(() => {
+    if (counts) onCounts(counts.pending);
+  }, [counts, onCounts]);
   const [query, setQuery] = useAccessFilter(filterKey("inbox"));
   const textFilter = accessFilter(query);
-  // the list is paged (`nextCursor`): "Show more" appends the next page of the tab that is open
-  const [extra, setExtra] = useState<{ view: View; items: Summary[]; cursor: string | null } | null>(null);
+  // the list is paged (`nextCursor`): "Show more" appends the next page of the tab that is open. The extra pages belong to the first page
+  // they were read after (`base`): when a poll brings a new first page, they are read again from it, so no item drops out between the pages.
+  const [extra, setExtra] = useState<{ view: View; base: ItemsListOutput; items: Summary[]; cursor: string | null; pages: number } | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const [moreError, setMoreError] = useState<string | null>(null);
   const older = extra && extra.view === view ? extra : null;
+  const refreshing = data !== null && older !== null && older.base !== data;
   const items = data ? [...data.items, ...(older?.items ?? []).filter((x) => !data.items.some((d) => d.id === x.id))] : [];
   const next = older ? older.cursor : (data?.nextCursor ?? null);
+  useEffect(() => {
+    if (!data || !extra || extra.view !== view || extra.base === data) return;
+    let live = true;
+    void (async () => {
+      try {
+        let cursor = data.nextCursor;
+        const got: Summary[] = [];
+        let pages = 0;
+        while (cursor && pages < extra.pages) {
+          const page: ItemsListOutput = await callOp<ItemsListOutput>("items_list", { view, limit: 100, cursor });
+          got.push(...page.items);
+          cursor = page.nextCursor;
+          pages++;
+        }
+        if (live) setExtra({ view, base: data, items: got, cursor, pages: extra.pages });
+      } catch (e) {
+        if (live) {
+          setMoreError(errText(e));
+          setExtra(null);
+        }
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [data, extra, view]);
   const showMore = async () => {
-    if (!next || loadingMore) return;
+    if (!data || !next || loadingMore || refreshing) return;
     setLoadingMore(true);
     setMoreError(null);
     try {
       const page = await callOp<ItemsListOutput>("items_list", { view, limit: 100, cursor: next });
-      setExtra((e) => ({ view, items: [...(e && e.view === view ? e.items : []), ...page.items], cursor: page.nextCursor }));
+      setExtra((e) => {
+        const keep = e && e.view === view && e.base === data ? e : null;
+        return { view, base: data, items: [...(keep?.items ?? []), ...page.items], cursor: page.nextCursor, pages: (keep?.pages ?? 0) + 1 };
+      });
     } catch (e) {
       setMoreError(errText(e));
     } finally {
@@ -348,8 +387,8 @@ export function InboxPage({ selected, onSelect, onCounts, hrefOf }: { selected: 
             value={view}
             onChange={setView}
             tabs={[
-              { value: "pending", label: data ? `Waiting (${data.counts.pending})` : "Waiting" },
-              { value: "snoozed", label: data ? `Snoozed (${data.counts.snoozed})` : "Snoozed" },
+              { value: "pending", label: counts ? `Waiting (${counts.pending})` : "Waiting" },
+              { value: "snoozed", label: counts ? `Snoozed (${counts.snoozed})` : "Snoozed" },
               { value: "done", label: "Done" },
               { value: "all", label: "All" },
             ]}
@@ -375,7 +414,7 @@ export function InboxPage({ selected, onSelect, onCounts, hrefOf }: { selected: 
                   onClear={() => setQuery("")}
                   onLoadMore={() => void showMore()}
                   loadMoreLabel="Show more"
-                  loadingMore={loadingMore}
+                  loadingMore={loadingMore || refreshing}
                   hidden={hiddenWaiting}
                   hiddenNoun={{ one: "item that waits for you", many: "items that wait for you" }}
                 />
@@ -388,7 +427,7 @@ export function InboxPage({ selected, onSelect, onCounts, hrefOf }: { selected: 
               {moreError ? <LoadError message={moreError} onRetry={() => void showMore()} /> : null}
               {next !== null ? (
                 <div>
-                  <Button onClick={() => void showMore()} disabled={loadingMore}>
+                  <Button onClick={() => void showMore()} disabled={loadingMore || refreshing}>
                     Show more
                   </Button>
                 </div>
