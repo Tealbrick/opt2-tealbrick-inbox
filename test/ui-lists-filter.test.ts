@@ -308,7 +308,7 @@ describe("All approvals filter", () => {
     remember("approvals", "zzz");
     const m = await approvalsPage();
     assert.match(text(m.host), /No loaded approval matches\./);
-    assert.match(text(m.host), /The filter searches only the 300 approvals loaded so far\./);
+    assert.match(text(m.host), /The filter searches only the 300 approvals this page holds\./);
     assert.doesNotMatch(text(m.host), /searched all/);
     await m.unmount();
     stub.approvals = Array.from({ length: 12 }, (_, i) => ({ ...approval(1), id: `itm_${i}`, product: "inbox", openUrl: null }));
@@ -317,7 +317,7 @@ describe("All approvals filter", () => {
     await own.unmount();
     stub.approvals = Array.from({ length: 100 }, (_, i) => ({ ...approval(1), id: `itm_${i}`, product: "inbox", openUrl: null }));
     const cutOwn = await approvalsPage();
-    assert.match(text(cutOwn.host), /The filter searches only the 100 approvals loaded so far\./);
+    assert.match(text(cutOwn.host), /The filter searches only the 100 approvals this page holds\./);
     await cutOwn.unmount();
     stub.approvals = [...Array.from({ length: 299 }, (_, i) => ({ ...approval(1), id: `hld_${i}` })), ...Array.from({ length: 99 }, (_, i) => ({ ...approval(2), id: `hld_c${i}`, product: "connect" }))];
     const under = await approvalsPage();
