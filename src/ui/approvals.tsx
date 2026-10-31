@@ -1,8 +1,9 @@
 // All approvals: every action that waits for the owner in every app of the workspace (op holds_overview). Deciding
 // stays in the owning app: each row opens it through Portal; Operator Inbox's own items open here.
-import { AppIcon, appArt, appName, ButtonLink, EmptyState, Notice } from "@opt2-tealbrick/ui";
+import { AppIcon, accessFilter, appArt, appName, ButtonLink, EmptyState, ListFilter, Notice, useAccessFilter } from "@opt2-tealbrick/ui";
 import type { MouseEvent } from "react";
 import type { HoldsOverviewOutput } from "#kit";
+import { APP_ROWS_MOST, FILTER_FROM, filterKey, OWN_PRODUCT, OWN_ROWS_MOST } from "./filtering.ts";
 import { ago, Head, LoadError, Loading, useOp } from "./shared.tsx";
 
 /** Where scripts/build-ui.ts puts the stills (next to this module in the hashed asset directory, C61). */
@@ -12,6 +13,15 @@ const plainClick = (e: MouseEvent) => e.button === 0 && !e.metaKey && !e.ctrlKey
 
 export function ApprovalsPage({ onOpenItem, itemHref }: { onOpenItem: (id: string) => void; itemHref: (id: string) => string }) {
   const { data, error, reload } = useOp<HoldsOverviewOutput>("holds_overview", {}, 30_000);
+  const [query, setQuery] = useAccessFilter(filterKey("approvals"));
+  const textFilter = accessFilter(query);
+  const all = data?.rows ?? [];
+  // the overview reads at most 3 pages of 100 per app and 100 own open items, and does not say when it cut: a group at its cap may be cut
+  const perProduct = new Map<string, number>();
+  for (const r of all) perProduct.set(r.product, (perProduct.get(r.product) ?? 0) + 1);
+  const cut = [...perProduct].some(([product, n]) => n >= (product === OWN_PRODUCT ? OWN_ROWS_MOST : APP_ROWS_MOST));
+  const rows = all.filter((r) => textFilter.test([r.summary, appName(r.product), r.caller.name, r.reason ?? r.op, r.op].join(" ")));
+  const showBar = data !== null && (all.length >= FILTER_FROM || query.trim() !== "");
   return (
     <section className="app-page" aria-label="All approvals">
       <Head title="All approvals" lede="Every action that waits for you, in every app of this workspace." />
@@ -24,8 +34,25 @@ export function ApprovalsPage({ onOpenItem, itemHref }: { onOpenItem: (id: strin
           {data.rows.length === 0 ? (
             <EmptyState title="Nothing waits for your approval." />
           ) : (
+            <>
+            {showBar ? (
+              <ListFilter
+                label="Filter the approvals"
+                value={query}
+                onChange={setQuery}
+                filter={textFilter}
+                placeholder="Summary, app, agent, or a regex"
+                noun={{ one: "approval", many: "approvals" }}
+                shown={rows.length}
+                total={all.length}
+                more={cut}
+                onClear={() => setQuery("")}
+                hidden={all.length - rows.length}
+                hiddenNoun={{ one: "approval that waits for you", many: "approvals that wait for you" }}
+              />
+            ) : null}
             <div className="ruled">
-              {data.rows.map((r) => {
+              {rows.map((r) => {
                 const name = appName(r.product);
                 return (
                   <div className="item" key={`${r.product}/${r.id}`}>
@@ -71,6 +98,7 @@ export function ApprovalsPage({ onOpenItem, itemHref }: { onOpenItem: (id: strin
                 );
               })}
             </div>
+            </>
           )}
           {data.errors.map((e) => (
             <Notice key={e.product} tone="needs-you" role="alert">

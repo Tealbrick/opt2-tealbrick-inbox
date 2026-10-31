@@ -3,9 +3,10 @@
 // started with a bare `void` that has no catch.
 import type { Json } from "@opt2-tealbrick/miniapp-sdk";
 import { callOp, TbError } from "@opt2-tealbrick/miniapp-sdk/client";
-import { Button, ButtonLink, EmptyState, Field, Notice, Select, type Status, Tabs, Tag, Textarea } from "@opt2-tealbrick/ui";
+import { accessFilter, Button, ButtonLink, EmptyState, Field, ListFilter, Notice, Select, type Status, Tabs, Tag, Textarea, useAccessFilter } from "@opt2-tealbrick/ui";
 import { type MouseEvent, useEffect, useRef, useState } from "react";
 import type { ItemGetOutput, ItemsListOutput } from "#kit";
+import { FILTER_FROM, filterKey } from "./filtering.ts";
 import { ago, day, errText, Head, LoadError, Loading, useOp, when, whenShort } from "./shared.tsx";
 
 type View = "pending" | "snoozed" | "done" | "all";
@@ -305,10 +306,77 @@ const EMPTY: Record<View, string> = {
 
 export function InboxPage({ selected, onSelect, onCounts, hrefOf }: { selected: string | null; onSelect: (id: string) => void; onCounts: (n: number) => void; hrefOf: (id: string) => string }) {
   const [view, setView] = useState<View>("pending");
-  const { data, error, reload } = useOp<ItemsListOutput>("items_list", { view, limit: 100 }, 15_000);
+  const { data: answer, error, reload } = useOp<ItemsListOutput>("items_list", { view, limit: 100 }, 15_000);
+  // useOp keeps the last answer while another tab loads: tag every answer with the tab it was asked for, so a tab never shows the rows or the cursor of another
+  const [tagged, setTagged] = useState<{ view: View; data: ItemsListOutput } | null>(null);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a new answer is tagged with the tab that is open when it arrives; useOp drops answers of another tab
   useEffect(() => {
-    if (data) onCounts(data.counts.pending);
-  }, [data, onCounts]);
+    if (answer) setTagged({ view, data: answer });
+  }, [answer]);
+  const data = tagged && tagged.view === view ? tagged.data : null;
+  const counts = tagged?.data.counts ?? null;
+  useEffect(() => {
+    if (counts) onCounts(counts.pending);
+  }, [counts, onCounts]);
+  const [query, setQuery] = useAccessFilter(filterKey("inbox"));
+  const textFilter = accessFilter(query);
+  // the list is paged (`nextCursor`): "Show more" appends the next page of the tab that is open. The extra pages belong to the first page
+  // they were read after (`base`): when a poll brings a new first page, they are read again from it, so no item drops out between the pages.
+  const [extra, setExtra] = useState<{ view: View; base: ItemsListOutput; items: Summary[]; cursor: string | null; pages: number } | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [moreError, setMoreError] = useState<string | null>(null);
+  const older = extra && extra.view === view ? extra : null;
+  const refreshing = data !== null && older !== null && older.base !== data;
+  const items = data ? [...data.items, ...(older?.items ?? []).filter((x) => !data.items.some((d) => d.id === x.id))] : [];
+  const next = older ? older.cursor : (data?.nextCursor ?? null);
+  useEffect(() => {
+    if (!data || !extra || extra.view !== view || extra.base === data) return;
+    let live = true;
+    void (async () => {
+      try {
+        let cursor = data.nextCursor;
+        const got: Summary[] = [];
+        let pages = 0;
+        while (cursor && pages < extra.pages) {
+          const page: ItemsListOutput = await callOp<ItemsListOutput>("items_list", { view, limit: 100, cursor });
+          got.push(...page.items);
+          cursor = page.nextCursor;
+          pages++;
+        }
+        if (live) setExtra({ view, base: data, items: got, cursor, pages: extra.pages });
+      } catch (e) {
+        if (live) {
+          setMoreError(errText(e));
+          setExtra(null);
+        }
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [data, extra, view]);
+  const showMore = async () => {
+    if (!data || !next || loadingMore || refreshing) return;
+    setLoadingMore(true);
+    setMoreError(null);
+    try {
+      const page = await callOp<ItemsListOutput>("items_list", { view, limit: 100, cursor: next });
+      setExtra((e) => {
+        const keep = e && e.view === view && e.base === data ? e : null;
+        return { view, base: data, items: [...(keep?.items ?? []), ...page.items], cursor: page.nextCursor, pages: (keep?.pages ?? 0) + 1 };
+      });
+    } catch (e) {
+      setMoreError(errText(e));
+    } finally {
+      setLoadingMore(false);
+    }
+  };
+  const rows = items.filter((i) => textFilter.test([i.title, i.from.name, i.kind === "approval" ? "approval" : "question", PRIORITY_LABEL[i.priority], i.status === "answered" ? "answered" : i.status === "expired" ? (i.withdrawn ? "withdrawn" : "expired") : ""].join(" ")));
+  const filterOn = query.trim() !== "";
+  // items that wait for the owner (open, not snoozed) and the filter hides: told, so none is forgotten
+  const waits = (i: Summary) => i.status === "open" && !i.snoozedUntil;
+  const hiddenWaiting = items.filter(waits).length - rows.filter(waits).length;
+  const showBar = data !== null && (items.length >= FILTER_FROM || next !== null || filterOn);
   return (
     <section className="app-page" aria-label="Inbox">
       <Head title="Inbox" />
@@ -319,8 +387,8 @@ export function InboxPage({ selected, onSelect, onCounts, hrefOf }: { selected: 
             value={view}
             onChange={setView}
             tabs={[
-              { value: "pending", label: data ? `Waiting (${data.counts.pending})` : "Waiting" },
-              { value: "snoozed", label: data ? `Snoozed (${data.counts.snoozed})` : "Snoozed" },
+              { value: "pending", label: counts ? `Waiting (${counts.pending})` : "Waiting" },
+              { value: "snoozed", label: counts ? `Snoozed (${counts.snoozed})` : "Snoozed" },
               { value: "done", label: "Done" },
               { value: "all", label: "All" },
             ]}
@@ -331,11 +399,40 @@ export function InboxPage({ selected, onSelect, onCounts, hrefOf }: { selected: 
           ) : data.items.length === 0 ? (
             <EmptyState title={EMPTY[view]}>{view === "pending" ? "Your agents’ questions and approval requests appear here." : undefined}</EmptyState>
           ) : (
-            <nav className="ruled" aria-label="Items">
-              {data.items.map((i) => (
-                <Row key={i.id} item={i} active={i.id === selected} href={hrefOf(i.id)} onOpen={() => onSelect(i.id)} />
-              ))}
-            </nav>
+            <>
+              {showBar ? (
+                <ListFilter
+                  label="Filter the items"
+                  value={query}
+                  onChange={setQuery}
+                  filter={textFilter}
+                  placeholder="Title, agent, or a regex"
+                  noun={{ one: "item", many: "items" }}
+                  shown={rows.length}
+                  total={items.length}
+                  more={next !== null}
+                  onClear={() => setQuery("")}
+                  onLoadMore={() => void showMore()}
+                  loadMoreLabel="Show more"
+                  loadingMore={loadingMore || refreshing}
+                  hidden={hiddenWaiting}
+                  hiddenNoun={{ one: "item that waits for you", many: "items that wait for you" }}
+                />
+              ) : null}
+              <nav className="ruled" aria-label="Items">
+                {rows.map((i) => (
+                  <Row key={i.id} item={i} active={i.id === selected} href={hrefOf(i.id)} onOpen={() => onSelect(i.id)} />
+                ))}
+              </nav>
+              {moreError ? <LoadError message={moreError} onRetry={() => void showMore()} /> : null}
+              {next !== null ? (
+                <div>
+                  <Button onClick={() => void showMore()} disabled={loadingMore || refreshing}>
+                    Show more
+                  </Button>
+                </div>
+              ) : null}
+            </>
           )}
         </div>
         <div>{selected ? <Detail key={selected} id={selected} onChanged={reload} /> : <EmptyState title="Select an item to read it and answer." />}</div>
