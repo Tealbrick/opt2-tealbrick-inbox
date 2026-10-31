@@ -56,7 +56,7 @@ const approval = (n: number) => ({
   createdAt: now,
   ageS: 60,
   decidePath: `/holds/hld_${n}`,
-  openUrl: `https://portal.example.test/open/${n}`,
+  openUrl: `https://portal.example.test/open/${n}` as string | null,
   allowAlwaysUrl: null,
 });
 
