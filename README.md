@@ -2,7 +2,7 @@
 
 Operator Inbox (product id `inbox`): the one queue from agents to the owner. Questions and approval requests, decisions with full history, and the pending holds of all apps in one list. The owner is the only approver. Built on the Miniapp SDK.
 
-**Status:** stable 0.2.9; 0.3.0 (adds `inbox_withdraw`, OD-1) is on dev and soaking on qa1; `main` is heading for 0.3.1 (refused-row caps, caller match on type + product, `inbox_ask open`). Do not roll back across a migration (0.3.0 → 0.2.9, 0.3.1 → 0.3.0): restore the pre-update snapshot instead. Visibility: public, Apache-2.0. Image: `ghcr.io/tealbrick/opt2-tealbrick-inbox` (publicly pullable; as of 2026-10-17 it holds the tag 0.2.9; 0.2.8 and older were published under the former owner's GHCR namespace).
+**Status:** 0.5.3, on the dev channel until promoted. Before it: stable 0.2.9; 0.3.0 (adds `inbox_withdraw`, OD-1) is on dev and soaking on qa1; `main` is heading for 0.3.1 (refused-row caps, caller match on type + product, `inbox_ask open`). Do not roll back across a migration (0.3.0 → 0.2.9, 0.3.1 → 0.3.0): restore the pre-update snapshot instead. Visibility: public, Apache-2.0. Image: `ghcr.io/tealbrick/opt2-tealbrick-inbox` (publicly pullable; as of 2026-10-17 it holds the tag 0.2.9; 0.2.8 and older were published under the former owner's GHCR namespace).
 
 - Repository: `Tealbrick/opt2-tealbrick-inbox` (GitHub organisation `Tealbrick`)
 - Licence: Apache-2.0 for the app code (`LICENSE`, `NOTICE`). The built UI vendors React (MIT), the Tealbrick kit and Nunito (SIL OFL 1.1); see `THIRD_PARTY_NOTICES.md`. The Tealbrick brand mark and app stills are Tealbrick artwork and are not covered by the Apache-2.0 licence.
